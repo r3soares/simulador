@@ -24,7 +24,7 @@ export const PARAMS = [
   { k:'redisMs', tip:"Tempo de cada acesso ao Redis. Cada requisição faz dois (ler e gravar a sessão).", label:'Latência do Redis (ms)', min:1, max:100, step:1 },
   { k:'rate', tip:"Requisições chegando por segundo (a carga). A chegada é aleatória, com essa média.", label:'Requisições por segundo', vals:RATEVALS },
   { k:'timeout', tip:"Tempo máximo de espera pelo PHP (como fastcgi_read_timeout no nginx ou ProxyTimeout/Timeout no Apache com FPM). Passou disso, a requisição recebe 504. Nos servidores reais o padrão costuma ser 60 s. Com mod_php (arquitetura A) o Apache não gera 504: quem daria o 504 é o balanceador, e o próprio PHP para em max_execution_time.", label:'Timeout do servidor web (s)', min:5, max:120, step:5 },
-  { k:'detect', tip:"Tempo até o balanceador notar que um backend caiu. Nesse intervalo ele ainda envia requisições ao backend morto (502). Aqui não há nova tentativa; nginx e HAProxy, por padrão, refazem em outro backend quando a conexão é recusada, e o cliente quase não vê erro.", label:'Tempo até o balanceador notar backend caído (s)', min:0, max:10, step:1 },
+  { k:'detect', tip:"Tempo até o balanceador notar que um backend caiu. Nesse intervalo ele ainda envia requisições ao backend morto (502). Aqui não há nova tentativa. O nginx, por padrão (proxy_next_upstream error timeout), refaz em outro backend quando a conexão é recusada e o cliente quase não vê erro; o HAProxy repete no mesmo servidor (retries) e só muda de servidor com option redispatch.", label:'Tempo até o balanceador notar backend caído (s)', min:0, max:10, step:1 },
   { k:'speed', label:'Velocidade da simulação', opts:[['0.1','0,1x'], ['0.25','0,25x'], ['0.5','0,5x'], ['1','1x'], ['2','2x'], ['4','4x']] },
 ];
 
