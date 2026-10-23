@@ -1,0 +1,625 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulador PHP: Apache, FPM e Redis</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1d2330; --muted:#69728a; --line:#d9dde7; --soft:#eef1f6; --blue:#1c7ed6; --orange:#e8590c; --purple:#7048e8; --green:#2f9e44; --red:#c92a2a;  --btn-ok:#1f6f2f; --btn-bad:#a32020;}
+  @media (prefers-color-scheme: dark) { :root { --bg:#12151c; --card:#1b2030; --fg:#e6e9f2; --muted:#98a1b8; --line:#2c3347; --soft:#242b40; --blue:#4dabf7; --orange:#ff8a4c; --purple:#9c86ff; --green:#51cf66; --red:#ff6b6b;  --btn-ok:#237a35; --btn-bad:#b02a2a;} }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui,sans-serif; }
+  main { max-width:1040px; margin:0 auto; padding:16px; }
+  h1 { font-size:20px; margin:0 0 14px; } .sub { color:var(--muted); margin:0 0 14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:12px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; }
+  button, select, input { font:inherit; border-radius:7px; border:1px solid var(--line); background:var(--card); color:var(--fg); padding:6px 10px; }
+  button { cursor:pointer; } button.p { background:var(--blue); color:#fff; border:0; } button.chip { background:var(--soft); }
+  button.chip.on { outline:2px solid var(--blue); }
+  button.st-up { background:var(--btn-ok); color:#fff; border:0; }
+  button.st-down { background:var(--btn-bad); color:#fff; border:0; }
+  #desc { margin:10px 0 0; color:var(--fg); } #desc b { color:var(--orange); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:10px 16px; }
+  .grid label { display:block; font-size:12px; color:var(--muted); } .grid .v { color:var(--fg); font-weight:600; float:right; }
+  .grid input[type=range] { width:100%; padding:0; } .grid select { width:100%; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:10px; }
+  .stats div { background:var(--soft); border-radius:8px; padding:8px 10px; } .stats span { display:block; font-size:11px; color:var(--muted); }
+  .stats b { font-size:20px; font-variant-numeric:tabular-nums; }
+  canvas { width:100%; display:block; }
+  table { border-collapse:collapse; width:100%; font-size:13px; } td, th { padding:4px 8px; border-bottom:1px solid var(--line); text-align:left; } th { color:var(--muted); font-weight:500; }
+  tr.flash td { background:color-mix(in srgb, var(--red) 14%, transparent); }
+  @media (max-width:480px) { td, th { padding:4px 5px; } }
+  .ok { color:var(--green); } .bad { color:var(--red); font-weight:600; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+  .leg span { margin-right:16px; font-size:12px; color:var(--muted); } .leg i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; }
+    textarea { width:100%; font:12px/1.4 ui-monospace,monospace; border:1px solid var(--line); border-radius:7px; background:var(--card); color:var(--fg); padding:8px; margin:8px 0; }
+  .rep ul { margin:4px 0 10px; padding-left:18px; } .rep b { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  .pcat { margin-bottom:12px; } .pcat-t { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:6px; }
+  .grp { background:var(--soft); border:1px solid var(--line); border-left:4px solid var(--blue); border-radius:10px; padding:12px 14px 14px; margin-bottom:14px; }
+  .grp:last-child { margin-bottom:0; }
+  .grp h3 { font-size:13px; text-transform:uppercase; letter-spacing:.07em; color:var(--blue); margin:0 0 12px; padding-bottom:8px; border-bottom:1px solid var(--line); }
+  .prm { position:relative; }
+  .prm .q { display:inline-block; width:14px; height:14px; border-radius:50%; background:var(--soft); color:var(--muted); font-size:10px; text-align:center; line-height:14px; margin-left:6px; cursor:pointer; user-select:none; }
+  .tipbox { display:none; position:absolute; left:0; bottom:100%; margin-bottom:4px; z-index:10; background:var(--fg); color:var(--bg); padding:8px 10px; border-radius:8px; font-size:12px; line-height:1.4; width:min(280px,86vw); box-shadow:0 4px 14px rgba(0,0,0,.25); pointer-events:none; }
+  .prm.open .tipbox { display:block; }
+  .prm.off label, .prm.off input, .prm.off select { opacity:.4; }
+  .prm.off input, .prm.off select { cursor:not-allowed; }
+  .errs { display:flex; flex-wrap:wrap; gap:8px; padding:0 8px 8px; }
+  .errs span { background:var(--soft); border-left:3px solid var(--red); border-radius:6px; padding:4px 10px; font-size:12px; color:var(--muted); }
+  .errs b { color:var(--red); margin-right:8px; }
+.note { color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Simulador: do cliente ao PHP</h1>
+  <div class="card">
+    <h2>Cenários prontos</h2>
+    <div class="chips" id="presets"></div>
+    <p id="desc">Escolha um cenário para ver uma situação típica explicada, ou ajuste os parâmetros mais abaixo.</p>
+  </div>
+
+  <div class="card">
+    <h2>Ações</h2>
+    <div class="chips">
+      <button class="p" id="burst">Rajada de 20 requisições</button>
+      <button id="pause">Pausar</button>
+      <button id="reset">Reiniciar</button>
+      <button id="redisBtn">Derrubar Redis</button>
+      <span id="killers" class="chips"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Estado</h2>
+    <div class="stats" id="stats"></div>
+  </div>
+
+  <div class="card" style="padding:8px">
+    <canvas id="cv" width="980" height="300"></canvas>
+    <div class="leg" style="padding:6px 8px"><span>bolinha = uma requisição</span><span><i style="background:var(--blue)"></i>thread do Apache ocupada</span><span><i style="background:var(--orange)"></i>worker/processo executando PHP</span><span><i style="background:var(--line)"></i>ocioso</span><span><i style="background:var(--red)"></i>erro</span><span>anel ao redor = cliente lento</span><span>bolinha vazada = resposta sem sessão</span></div>
+    <div class="errs">
+      <span><b>502</b>backend caído (conexão recusada ou interrompida)</span>
+      <span><b>502 / 503</b>nenhum backend disponível</span>
+      <span><b>503</b>fila de conexões do Apache cheia (backlog 511)</span>
+      <span><b>504</b>tempo esgotado esperando o PHP</span>
+    </div>
+  </div>
+
+  <div class="card" id="sesscard" hidden>
+    <h2>Sessões dos 6 usuários</h2>
+    <p class="note" style="margin:0 0 8px">Pense na sessão como o login ou o carrinho do usuário. A coluna <i>sessão</i> conta as requisições seguidas que encontraram a sessão; volta a 0 quando ela se perde (o usuário "é deslogado"), e <i>perdas</i> soma quantas vezes isso aconteceu.</p>
+    <div style="overflow-x:auto"><table><thead><tr><th>usuário</th><th title="requisições seguidas sem perder a sessão">sessão</th><th>guardada em</th><th>última requisição</th><th title="vezes que a sessão se perdeu">perdas</th></tr></thead><tbody id="sess"></tbody></table></div>
+  </div>
+
+  <div class="card">
+    <h2>Carregar configuração</h2>
+    <p class="note" style="margin:0 0 8px">Arquivos aceitos: <code>php.ini</code>, <code>www.conf</code> (pool do PHP-FPM), <code>httpd.conf</code> e <code>mpm_*.conf</code> (Apache).</p>
+    <input type="file" id="cfgfile" multiple accept=".ini,.conf,.cfg,.txt">
+    <div id="cfgreport" class="rep note" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Parâmetros (mexa durante a execução)</h2>
+    <div id="params"></div>
+    <p class="note" style="margin-bottom:0">Mudar arquitetura, número de backends, limite do Apache, max_children, pm ou start_servers reinicia a simulação. Os demais ajustes valem na hora.</p>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const COLORS = ['#1c7ed6', '#e8590c', '#2f9e44', '#7048e8', '#d6336c', '#f08c00'];
+const cfg = { arch:'B', nb:1, lb:'rr', T:8, W:4, pm:'static', exec:800, opcache:'on', slowPct:0, slowMs:3000, session:'none', redisMs:5, rate:3, speed:1, minSpare:1, maxSpare:3, timeout:30, detect:4, start:2, idleTimeout:6 };
+const TVALS = [1,2,3,4,5,6,8,10,12,15,16,20,24,25,32,48,50,64,75,100,128,150,200,256,300,400,500,512,600];
+const WVALS = [1,2,3,4,5,6,8,10,12,16,20,24,30,32,40,48,50,64,80,100,128,150,200,256,300,400,500,512];
+const RATEVALS = [0,1,2,3,4,5,6,8,10,12,15,20,25,30,40,50,75,100,150,200,300,400,500,750,1000];
+const BACKLOG = 511; // ListenBacklog padrão do Apache
+
+const PARAMS = [
+  { k:'arch', tip:"Como o PHP roda: dentro do processo do Apache (prefork + mod_php) ou em um serviço separado (Apache event + PHP-FPM).", label:'Arquitetura', opts:[['B','B · Apache event + PHP-FPM'], ['A','A · Apache prefork + mod_php']], struct:1 },
+  { k:'nb', tip:"Servidor de aplicação (Apache + PHP) que fica atrás do balanceador e recebe uma parte das requisições.", label:'Backends', opts:[['1','1 backend'], ['2','2 backends'], ['3','3 backends']], struct:1 },
+  { k:'lb', tip:"Como o balanceador escolhe o backend: em rodízio (round-robin), sempre o mesmo para o mesmo cliente (sticky) ou o menos ocupado. Só vale com 2 ou mais backends.", label:'Balanceamento', opts:[['rr','round-robin'], ['ip','sticky (mesmo cliente, mesmo backend)'], ['lc','menos conexões']] },
+  { k:'T', tip:"MaxRequestWorkers: quantas requisições o Apache atende ao mesmo tempo. No event cada uma usa uma thread; no prefork, um processo inteiro (com o PHP dentro).", label:'Apache: máximo de requisições simultâneas', vals:TVALS, struct:1 },
+  { k:'W', tip:"pm.max_children: máximo de workers do PHP-FPM, isto é, de scripts PHP rodando ao mesmo tempo. Passou disso, as requisições esperam na fila.", label:'pm.max_children', vals:WVALS, struct:1 },
+  { k:'pm', tip:"pm: como o FPM gerencia os workers. static: número fixo. dynamic: cresce e encolhe entre limites. ondemand: cria quando chega requisição e remove os ociosos.", label:'pm (modo do pool)', opts:[['static','static'], ['dynamic','dynamic'], ['ondemand','ondemand']], struct:1 },
+  { k:'start', tip:"pm.start_servers: quantos workers existem na partida (modo dynamic).", label:'pm.start_servers', min:1, max:64, step:1, struct:1 },
+  { k:'minSpare', tip:"pm.min_spare_servers: mínimo de workers ociosos. Abaixo disso o FPM cria mais, aumentando o ritmo a cada segundo (modo dynamic).", label:'pm.min_spare_servers', min:1, max:32, step:1 },
+  { k:'maxSpare', tip:"pm.max_spare_servers: máximo de workers ociosos. Acima disso o FPM remove um por vez (modo dynamic).", label:'pm.max_spare_servers', min:1, max:64, step:1 },
+  { k:'idleTimeout', tip:"pm.process_idle_timeout: tempo ocioso depois do qual um worker é removido (modo ondemand).", label:'pm.process_idle_timeout (s)', min:1, max:60, step:1 },
+  { k:'exec', tip:"Quanto tempo o script PHP leva (consultas, APIs, cálculo). Ele ocupa um worker durante todo esse tempo.", label:'Duração do PHP (ms)', min:50, max:3000, step:50 },
+  { k:'opcache', tip:"O OPcache guarda o código já compilado em memória. Desligado, cada requisição recompila os arquivos (aqui +120 ms, valor ilustrativo).", label:'OPcache', opts:[['on','ligado'], ['off','desligado']] },
+  { k:'slowPct', tip:"Percentual de clientes com conexão lenta ou resposta grande, que demoram para receber a resposta.", label:'Clientes lentos (%)', min:0, max:100, step:10 },
+  { k:'slowMs', tip:"Quanto tempo esses clientes lentos levam para receber a resposta.", label:'Tempo para o cliente lento receber (ms)', min:500, max:8000, step:500 },
+  { k:'session', tip:"Onde ficam as sessões: nenhuma, em arquivo no próprio backend (se a próxima requisição cair em outro, a sessão se perde) ou em um Redis compartilhado.", label:'Sessão', opts:[['none','sem sessão'], ['file','arquivo local do backend'], ['redis','Redis compartilhado']] },
+  { k:'redisMs', tip:"Tempo de cada acesso ao Redis. Cada requisição faz dois (ler e gravar a sessão).", label:'Latência do Redis (ms)', min:1, max:100, step:1 },
+  { k:'rate', tip:"Requisições chegando por segundo (a carga). A chegada é aleatória, com essa média.", label:'Requisições por segundo', vals:RATEVALS },
+  { k:'timeout', tip:"Tempo máximo de espera pelo PHP (como fastcgi_read_timeout no nginx ou ProxyTimeout/Timeout no Apache com FPM). Passou disso, a requisição recebe 504. Nos servidores reais o padrão costuma ser 60 s. Com mod_php (arquitetura A) o Apache não gera 504: quem daria o 504 é o balanceador, e o próprio PHP para em max_execution_time.", label:'Timeout do servidor web (s)', min:5, max:120, step:5 },
+  { k:'detect', tip:"Tempo até o balanceador notar que um backend caiu. Nesse intervalo ele ainda envia requisições ao backend morto (502). Aqui não há nova tentativa; nginx e HAProxy, por padrão, refazem em outro backend quando a conexão é recusada, e o cliente quase não vê erro.", label:'Tempo até o balanceador notar backend caído (s)', min:0, max:10, step:1 },
+  { k:'speed', label:'Velocidade da simulação', opts:[['0.1','0,1x'], ['0.25','0,25x'], ['0.5','0,5x'], ['1','1x'], ['2','2x'], ['4','4x']] },
+];
+
+const GROUPS = [
+  ['Servidor web e balanceador', ['arch', 'nb', 'lb', 'T']],
+  ['PHP-FPM', ['pm', 'W', 'start', 'minSpare', 'maxSpare', 'idleTimeout']],
+  ['Aplicação PHP', ['exec', 'opcache', 'session', 'redisMs']],
+  ['Carga e clientes', ['rate', 'slowPct', 'slowMs']],
+  ['Timeouts e falhas', ['timeout', 'detect']],
+  ['Simulação', ['speed']],
+];
+// parâmetros que só fazem sentido em certas configurações ficam desabilitados
+const ENABLE = {
+  pm: c => c.arch === 'B', W: c => c.arch === 'B',
+  start: c => c.arch === 'B' && c.pm === 'dynamic', minSpare: c => c.arch === 'B' && c.pm === 'dynamic', maxSpare: c => c.arch === 'B' && c.pm === 'dynamic',
+  idleTimeout: c => c.arch === 'B' && c.pm === 'ondemand',
+  lb: c => c.nb > 1, slowMs: c => c.slowPct > 0, redisMs: c => c.session === 'redis',
+};
+function updateEnabled() {
+  document.querySelectorAll('#params .prm').forEach(div => {
+    const el = div.querySelector('[data-k]'), f = el && ENABLE[el.dataset.k], on = f ? f(cfg) : true;
+    if (el) el.disabled = !on; div.classList.toggle('off', !on);
+  });
+}
+
+const PRESETS = [
+  // ---- Mais comuns ----
+  { cat:'Mais comuns', name:'Pool saturado', cfg:{ arch:'B', nb:1, lb:'rr', T:20, W:2, pm:'static', exec:800, session:'none', slowPct:0, rate:4, opcache:'on' },
+    text:'4 req/s × 0,8 s = 3,2 workers necessários, mas só há <b>2</b>. Observe a <b>fila do PHP-FPM</b> crescer, as threads do Apache ficarem presas esperando e a latência subir. Depois de cerca de um minuto e meio, as requisições que esperam mais que o <i>timeout</i> do servidor web (30 s) viram <b>504</b>. Aumente <i>max_children</i> para 4 e veja a fila sumir.' },
+  { cat:'Mais comuns', name:'Dependência lenta', cfg:{ arch:'B', nb:1, lb:'rr', T:20, W:8, pm:'static', exec:200, session:'none', slowPct:0, rate:20, opcache:'on' },
+    text:'Tudo saudável: 20 req/s × 0,2 s = 4 workers ocupados, de 8. Clique em <b>Banco ficou lento</b>: o PHP passa a levar 2 s (consulta lenta, API externa fora do ar). O mesmo tráfego agora exigiria 40 workers, o pool satura e a fila cresce. Com o tempo vêm os <b>504</b> e, quando a fila de conexões do Apache enche, também os <b>503</b>; a vazão de sucesso despenca: as requisições esperam tanto que expiram antes de terminar. O código PHP não mudou; só a dependência ficou lenta. Clique em <b>Banco voltou ao normal</b> e veja a recuperação.',
+    actions:[{ label:'Banco ficou lento (PHP: 0,2 s → 2 s)', run:() => { cfg.exec = 2000; buildParams(); } }, { label:'Banco voltou ao normal', run:() => { cfg.exec = 200; buildParams(); } }] },
+  { cat:'Mais comuns', name:'Timeout curto', cfg:{ arch:'B', nb:1, lb:'rr', T:20, W:2, pm:'static', exec:800, session:'none', slowPct:0, rate:4, opcache:'on', timeout:5 },
+    text:'Pool de 2 workers (capacidade ≈ 2,5 req/s) recebendo 4 req/s, com timeout de 5 s. A fila cresce até as requisições passarem de 5 s esperando e virarem <b>504</b>. Pior: as que ainda chegam a um worker já estão quase expiradas e também dão 504 ao terminar, então a vazão de sucesso cai a quase zero. O timeout só limita a espera, não cria capacidade. Aumente <i>max_children</i> para 4 e os erros somem.' },
+  { cat:'Mais comuns', name:'Backend cai (failover)', cfg:{ arch:'B', nb:3, lb:'rr', T:8, W:4, pm:'static', exec:300, session:'none', slowPct:0, rate:6, opcache:'on', detect:4 },
+    text:'3 servidores de aplicação em rodízio. Clique em <b>Derrubar app2</b>: enquanto o balanceador não percebe (padrão 4 s), cerca de 1 em cada 3 novas requisições vai ao servidor caído e dá <b>502</b>; depois ele sai do rodízio e os erros param. Clique em <b>Subir app2</b> para ver a volta. Repita com <i>Tempo até o balanceador notar</i> = 0 e compare. Este balanceador não tenta de novo: no nginx (<code>proxy_next_upstream</code>) e no HAProxy (<code>retries</code>), uma conexão recusada é refeita em outro servidor e o cliente quase não vê erro; os 502 que sobram são das requisições que estavam em andamento no servidor que caiu.' },
+
+  // ---- Comuns ----
+  { cat:'Comuns', name:'Gargalo nas threads do Apache', cfg:{ arch:'B', nb:1, lb:'rr', T:4, W:16, pm:'static', exec:800, session:'none', slowPct:0, rate:8, opcache:'on' },
+    text:'O Apache aceita só <b>4</b> requisições simultâneas, mas o PHP-FPM tem <b>16</b> workers. Compare as filas: a <b>fila de espera do Apache</b> cresce enquanto o FPM quase não é usado. Na cadeia, o menor limite manda, então aumentar só o FPM não ajuda. Eleve o limite de requisições simultâneas do Apache para 16.' },
+  { cat:'Comuns', name:'Sessões em 3 backends', cfg:{ arch:'B', nb:3, lb:'rr', T:8, W:4, pm:'static', exec:300, session:'file', slowPct:0, rate:4, opcache:'on' },
+    text:'Sessão em <b>arquivo local</b> com round-robin: veja o contador "sessões perdidas" subir e as bolinhas das sessões pulando de um servidor para outro. Experimente <i>Balanceamento = sticky</i> (no nginx real o <code>ip_hash</code> agrupa por /24 do IPv4) e depois <i>Sessão = Redis compartilhado</i>.' },
+  { cat:'Comuns', name:'Sticky e a queda de um backend', cfg:{ arch:'B', nb:3, lb:'ip', T:8, W:4, pm:'static', exec:300, session:'file', slowPct:0, rate:4, opcache:'on', detect:4 },
+    text:'Com <b>sticky</b> cada usuário fica no mesmo servidor e a sessão em arquivo local não se perde. Clique em <b>Derrubar app2</b>: depois que o balanceador percebe, os usuários dele vão para outros servidores e <b>perdem a sessão</b>. Aqui o mapeamento é refeito por módulo sobre os servidores restantes, então até usuários de servidores saudáveis trocam de lugar. É o que acontece no HAProxy com <code>balance source</code> e o <code>hash-type</code> padrão (map-based). No nginx <code>ip_hash</code>, um servidor que falha (ou é marcado <code>down</code>) só desvia os próprios usuários; os outros ficam onde estavam. Apagar a linha do servidor é que remapeia todo mundo.' },
+  { cat:'Comuns', name:'Sessão no Redis', cfg:{ arch:'B', nb:3, lb:'rr', T:8, W:4, pm:'static', exec:300, session:'redis', redisMs:5, slowPct:0, rate:4, opcache:'on' },
+    text:'Com <b>Redis</b> a sessão não se perde ao trocar de servidor. Clique em <b>Derrubar Redis</b>: ele é um ponto único de falha. O PHP só emite avisos (<code>session_start()</code> devolve <code>false</code>) e a página continua respondendo <b>200</b>, mas <b>sem sessão</b>: todos aparecem deslogados (bolinhas vazadas) e os dados voltam quando o Redis volta. Uma aplicação que trate esses avisos como erro responderia 500. Já derrubar um servidor de aplicação não perde as sessões, mas as requisições em andamento nele dão erro, e as novas também, até o balanceador notar a queda.' },
+  { cat:'Comuns', name:'OPcache desligado', cfg:{ arch:'B', nb:1, lb:'rr', T:20, W:2, pm:'static', exec:100, opcache:'off', session:'none', slowPct:0, rate:12 },
+    text:'Sem OPcache cada request custa 0,22 s neste modelo (2 workers → ~9 req/s), menos do que os 12 req/s que chegam: a fila cresce. <b>Ligue o OPcache</b> (0,1 s → ~20 req/s) e a fila desaparece. O custo de +120 ms é ilustrativo; na prática o ganho depende do tamanho da aplicação.' },
+  { cat:'Comuns', name:'Pico no modo dynamic', cfg:{ arch:'B', nb:1, lb:'rr', T:20, W:10, pm:'dynamic', exec:800, session:'none', slowPct:0, rate:0, opcache:'on', minSpare:1, maxSpare:3 },
+    text:'O pool começa com 2 workers (<i>start_servers</i>). Clique em <b>Rajada de 20 requisições</b>: a cada segundo o master cria no máximo <code>min(taxa, min_spare − ociosos)</code> workers (a taxa dobra: 1, 2, 4…, mas é limitada pelo déficit). Com <i>min_spare</i> = 1 nasce <b>1 worker por segundo</b>; aumente <i>min_spare</i> e repita a rajada para ver o pool crescer mais rápido. Compare com <i>pm = static</i> (todos prontos) e <i>ondemand</i> (começa com zero).' },
+
+  // ---- Didáticos ----
+  { cat:'Didáticos', name:'Cliente lento: prefork', cfg:{ arch:'A', nb:1, lb:'rr', T:6, exec:100, session:'none', slowPct:50, slowMs:3000, rate:6, opcache:'on' },
+    text:'O PHP é rápido (0,1 s), mas metade dos clientes demora 3 s para receber a resposta (pense em resposta grande ou conexão muito lenta; no prefork o <i>keep-alive</i> também prende o processo). No <b>prefork + mod_php</b> o processo, com o PHP dentro, fica ocupado até entregar tudo: os 6 processos enchem e o resto enfileira. Agora troque <i>Arquitetura</i> para <b>B</b> (com <i>max_children</i> = 6).' },
+  { cat:'Didáticos', name:'Cliente lento: event + FPM', cfg:{ arch:'B', nb:1, lb:'rr', T:20, W:6, pm:'static', exec:100, session:'none', slowPct:50, slowMs:3000, rate:6, opcache:'on' },
+    text:'Mesma carga. Este modelo supõe que o servidor web <b>recebe a resposta inteira do FPM e a entrega ao cliente sozinho</b> (buffering), liberando o worker; por isso a fila do PHP-FPM não se forma. Isso é o que o <b>nginx</b> faz por padrão (<code>fastcgi_buffering</code>, em memória e depois em arquivo temporário). O <b>Apache</b> com <code>mod_proxy_fcgi</code> não faz: a documentação do event diz que, em conteúdo FCGI/proxy, a thread só é liberada ao fim da resposta; e, se a resposta não cabe nos buffers, o worker do FPM também espera o cliente lento. Trate este cenário como o <b>caso ideal (nginx na frente)</b>, não como Apache event.' },
+  { cat:'Didáticos', name:'ondemand: partida a frio', cfg:{ arch:'B', nb:1, lb:'rr', T:20, W:10, pm:'ondemand', exec:300, session:'none', slowPct:0, rate:0, opcache:'on', idleTimeout:6 },
+    text:'Em <b>ondemand</b> o pool começa vazio. Clique em <b>Rajada de 20 requisições</b>: os workers nascem sob demanda (quadrados tracejados = ainda iniciando) e as primeiras requisições pagam esse custo. Espere mais de 6 s sem tráfego (<i>process_idle_timeout</i>): os workers somem, <b>um por segundo</b> (o master remove no máximo um por passagem). Uma nova rajada volta a partir do zero.' },
+  { cat:'Didáticos', name:'Escala: 512 workers', cfg:{ arch:'B', nb:1, lb:'rr', T:600, W:512, pm:'static', exec:800, session:'none', slowPct:0, rate:500, opcache:'on' },
+    text:'500 req/s × 0,8 s = 400 workers ocupados, de 512. Com tanta coisa, cada quadrado representa vários workers (a cor mostra a fração ocupada). Suba a carga para 750 req/s: passa da capacidade (640 req/s), a fila enche e começam os <b>503</b> (fila de conexões cheia; no Linux real o cliente veria retransmissões e timeouts, não um 503).' },
+];
+
+const W = 980, PX = 250, PW = 570, PH = 185, STEP = 205, CLX = 55, LBX = 170, RX = 860;
+let T = 0, reqs = [], users = [], backends = [], redis = { up:true, ops:0 }, lines = [], seq = 0, rr = 0, nextArr = 0, paused = false;
+let stats, H = 300;
+
+function resetStats() { stats = { done:0, errors:0, lost:0, noSess:0, lat:[], times:[], codes:{} }; }
+function layout() { H = 40 + 3 * STEP + 5; // altura fixa (cabem 3 backends): evita que o painel de parâmetros se desloque ao mudar o nº de backends; o tamanho real do canvas é ajustado em draw()
+  users.forEach((u, i) => u.y = 40 + i * (H - 80) / 5); }
+function initWorkers(b) {
+  b.workers = [];
+  if (cfg.arch !== 'B' || cfg.pm === 'ondemand') return;
+  const n = cfg.pm === 'static' ? cfg.W : Math.min(cfg.start, cfg.W);
+  for (let i = 0; i < n; i++) b.workers.push({ state:'idle', req:null, idleSince:T });
+}
+function newBackend(i) {
+  const b = { i, up:true, thrBusy:0, apacheQ:[], fpmQ:[], workers:[], procSlots:Array(cfg.T).fill(null), procBusy:0, warm:false, pmTimer:0, spawnN:1, maxReached:0, atMax:false, listed:true, flipAt:null };
+  initWorkers(b); return b;
+}
+function reset() {
+  T = 0; reqs = []; lines = []; nextArr = 0; rr = 0; resetStats(); redis = { up:redis.up, ops:0 };
+  users = COLORS.map((c, i) => ({ id:i, color:c, hits:0, where:null, y:0, lostN:0, last:null }));
+  backends = Array.from({ length:cfg.nb }, (_, i) => newBackend(i));
+  layout(); buildKillers();
+}
+
+// ---------- simulação ----------
+function spawnReq() {
+  const u = users[Math.floor(Math.random() * users.length)];
+  reqs.push({ id:++seq, u, color:u.color, t0:T, stage:'toLB', timer:120, b:-1, x:CLX, y:u.y, slow:Math.random() < cfg.slowPct / 100,
+    jx:(Math.random() - .5) * 26, jy:(Math.random() - .5) * 26, qi:0, thread:false, hasProc:false, slot:-1, worker:null, dead:false, msg:'' });
+}
+function pick(r) {
+  const up = backends.filter(b => b.listed);
+  if (!up.length) return null;
+  if (cfg.lb === 'ip') return up[r.u.id % up.length];
+  if (cfg.lb === 'lc') return up.reduce((a, b) => load(b) < load(a) ? b : a);
+  return up[rr++ % up.length];
+}
+function load(b) { return b.thrBusy + b.procBusy + b.apacheQ.length + b.fpmQ.length; }
+
+function startExec(r, b) {
+  r.stage = 'exec';
+  let t = cfg.exec * (0.85 + Math.random() * 0.3);
+  if (cfg.opcache === 'off') t += 120; else if (!b.warm) { t += 120; b.warm = true; }
+  const u = r.u;
+  if (cfg.session === 'file') {
+    if (u.where !== null && u.where !== b.i) { u.last = { kind:'lost', b:b.i, from:u.where, t:T }; u.hits = 0; u.lostN++; stats.lost++; }
+    else u.last = { kind:u.where === null ? 'new' : 'ok', b:b.i, t:T };
+    u.where = b.i; u.hits++; t += 2;
+  } else if (cfg.session === 'redis') {
+    // sem Redis: o PHP só emite avisos e session_start() devolve false; os dados continuam no Redis
+    if (!redis.up) { r.noSess = true; u.last = { kind:'nosess', b:b.i, t:T }; }
+    else { u.last = { kind:u.where === 'redis' ? 'ok' : 'new', b:b.i, t:T }; u.hits++; u.where = 'redis'; t += 2 * cfg.redisMs; redis.ops += 2; lines.push({ r, life:1 }); }
+  }
+  r.timer = t;
+}
+function acquireProc(r, b) {
+  const idx = b.procSlots.indexOf(null); b.procSlots[idx] = r; r.slot = idx; b.procBusy++; r.hasProc = true; startExec(r, b);
+}
+function freeProc(r, b) {
+  if (!r.hasProc) return;
+  b.procSlots[r.slot] = null; r.hasProc = false; b.procBusy--;
+  while (b.procBusy < cfg.T && b.apacheQ.length) acquireProc(b.apacheQ.shift(), b);
+}
+function freeThread(r, b) {
+  if (!r.thread) return;
+  r.thread = false; b.thrBusy--;
+  while (b.thrBusy < cfg.T && b.apacheQ.length) { const n = b.apacheQ.shift(); b.thrBusy++; n.thread = true; n.stage = 'fpmq'; n.timer = Infinity; b.fpmQ.push(n); }
+}
+function fail(r, msg) {
+  const b = backends[r.b];
+  if (b) {
+    if (r.worker) { r.worker.state = 'idle'; r.worker.req = null; r.worker.idleSince = T; r.worker = null; }
+    b.apacheQ = b.apacheQ.filter(x => x !== r); b.fpmQ = b.fpmQ.filter(x => x !== r);
+    freeThread(r, b); freeProc(r, b);
+  }
+  stats.errors++; stats.codes[msg] = (stats.codes[msg] || 0) + 1; r.stage = 'err'; r.timer = 700; r.msg = msg;
+}
+function arrive(r, b) {
+  r.tArr = T;
+  if (cfg.arch === 'B') {
+    if (b.thrBusy < cfg.T) { b.thrBusy++; r.thread = true; r.stage = 'fpmq'; r.timer = Infinity; b.fpmQ.push(r); }
+    else if (b.apacheQ.length >= BACKLOG) return fail(r, '503');
+    else { r.stage = 'apacheq'; r.timer = Infinity; b.apacheQ.push(r); }
+  } else if (b.procBusy < cfg.T) acquireProc(r, b);
+  else if (b.apacheQ.length >= BACKLOG) return fail(r, '503');
+  else { r.stage = 'apacheq'; r.timer = Infinity; b.apacheQ.push(r); }
+}
+function advance(r) {
+  const b = backends[r.b];
+  switch (r.stage) {
+    case 'toLB': { const nb = pick(r); if (!nb) return fail(r, '502/503'); r.b = nb.i; r.stage = 'toBackend'; r.timer = 120; break; }
+    case 'toBackend': if (!b.up) return fail(r, '502'); arrive(r, b); break;
+    case 'exec':
+      if (T - r.tArr > cfg.timeout * 1000) return fail(r, '504');
+      if (cfg.arch === 'B') { const w = r.worker; w.state = 'idle'; w.req = null; w.idleSince = T; r.worker = null; freeThread(r, b); }
+      r.stage = 'send'; r.timer = r.slow ? cfg.slowMs : 20; break;
+    case 'send': if (cfg.arch === 'A') freeProc(r, b); r.stage = 'back'; r.timer = 250; break;
+    case 'back': {
+      const lat = T - r.t0; stats.done++; if (r.noSess) stats.noSess++; stats.lat.push(lat); if (stats.lat.length > 200) stats.lat.shift(); stats.times.push(T); r.dead = true; break;
+    }
+    case 'err': r.dead = true; break;
+  }
+}
+function maintain(b, dt) {
+  if (!b.up || cfg.arch !== 'B') return;
+  for (const w of b.workers) if (w.state === 'starting' && T >= w.readyAt) { w.state = 'idle'; w.idleSince = T; }
+  b.pmTimer += dt;
+  if (b.pmTimer >= 1000) {
+    b.pmTimer -= 1000;
+    const idle = b.workers.filter(w => w.state === 'idle');
+    if (cfg.pm === 'dynamic') {
+      // regra do php-fpm: se ociosos < min_spare, cria min(taxa, min_spare - ociosos, max_children - total); a taxa dobra a cada segundo com déficit
+      if (idle.length < cfg.minSpare) {
+        if (b.workers.length < cfg.W) {
+          const n = Math.min(b.spawnN, cfg.minSpare - idle.length, cfg.W - b.workers.length);
+          for (let i = 0; i < n; i++) b.workers.push({ state:'idle', req:null, idleSince:T });
+          b.spawnN = Math.min(b.spawnN * 2, 32);
+        } else { if (!b.atMax) { b.maxReached++; b.atMax = true; } b.spawnN = 1; }
+      } else { b.spawnN = 1; b.atMax = false; }
+      if (idle.length > cfg.maxSpare) { const w = idle.sort((a, c) => a.idleSince - c.idleSince)[0]; b.workers.splice(b.workers.indexOf(w), 1); b.spawnN = 1; }
+    } else if (cfg.pm === 'ondemand') {
+      // como no php-fpm: no máximo um worker removido por passagem (1 s)
+      const w = idle.filter(w => T - w.idleSince > cfg.idleTimeout * 1000).sort((a, c) => a.idleSince - c.idleSince)[0];
+      if (w) b.workers.splice(b.workers.indexOf(w), 1);
+    }
+  }
+  if (cfg.pm === 'ondemand') {
+    const cap = b.workers.filter(w => w.state === 'idle' || w.state === 'starting').length;
+    let need = b.fpmQ.length - cap;
+    while (need > 0 && b.workers.length < cfg.W) { b.workers.push({ state:'starting', req:null, idleSince:T, readyAt:T + 200 }); need--; }
+    if (need > 0) { if (!b.atMax) { b.maxReached++; b.atMax = true; } } else b.atMax = false;
+  }
+  for (const w of b.workers) if (w.state === 'idle' && b.fpmQ.length) {
+    const r = b.fpmQ.shift(); w.state = 'busy'; w.req = r; r.worker = w; startExec(r, b);
+  }
+}
+function step(dt) {
+  T += dt;
+  if (cfg.rate > 0) {
+    nextArr -= dt;
+    while (nextArr <= 0) { spawnReq(); nextArr += -Math.log(1 - Math.random()) / cfg.rate * 1000; }
+  }
+  for (const r of reqs.slice()) { r.timer -= dt; if (r.timer <= 0 && !r.dead) advance(r); }
+  reqs = reqs.filter(r => !r.dead);
+  backends.forEach(b => maintain(b, dt));
+  for (const b of backends) if (b.flipAt !== null && T >= b.flipAt) { b.listed = b.up; b.flipAt = null; }
+  for (const r of reqs) if (!r.dead && (r.stage === 'apacheq' || r.stage === 'fpmq') && T - r.tArr > cfg.timeout * 1000) fail(r, '504');
+  stats.times = stats.times.filter(t => T - t < 5000);
+}
+function toggleBackend(i) {
+  const b = backends[i];
+  if (b.up) {
+    // em A e em B quem entrega a resposta é o Apache deste backend: quem está em 'send' também falha
+    for (const r of reqs.slice()) if (r.b === i && ['toBackend', 'apacheq', 'fpmq', 'exec', 'send'].includes(r.stage)) fail(r, '502');
+    b.up = false; b.apacheQ = []; b.fpmQ = []; b.workers = []; b.thrBusy = 0; b.procBusy = 0; b.procSlots.fill(null);
+  } else { b.up = true; b.warm = false; initWorkers(b); }
+  if (cfg.detect === 0) { b.listed = b.up; b.flipAt = null; } else b.flipAt = T + cfg.detect * 1000;
+  buildKillers();
+}
+
+// ---------- desenho ----------
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+// grade de células: até 24 unidades = quadrados grandes; acima disso, quadrados pequenos e, passando de 144, cada quadrado agrupa k unidades
+const gl = n => n <= 24 ? { big:true, w:18, step:24, per:8, groups:n, k:1 } : { big:false, w:8, step:10, per:24, groups:Math.min(n, 144), k:Math.ceil(n / 144) };
+const cell = (x0, y0, i, n) => { const L = gl(n), g = Math.min(Math.max(L.groups - 1, 0), Math.floor(i / L.k)); return { x:x0 + (g % L.per) * L.step + L.w / 2 + 1, y:y0 + Math.floor(g / L.per) * L.step + L.w / 2 + 1 }; };
+const QCAP_A = 34, QCAP_F = 44;
+const panelY = i => 20 + i * STEP + (3 - cfg.nb) * STEP / 2; // centraliza os backends na altura fixa
+function target(r) {
+  const py = r.b >= 0 ? panelY(r.b) : 0, b = backends[r.b];
+  switch (r.stage) {
+    case 'toLB': return { x:LBX + r.jx, y:H / 2 + r.jy };
+    case 'toBackend': return { x:PX + r.jx / 2, y:py + 70 + r.jy };
+    case 'apacheq': { const i = Math.min(r.qi, QCAP_A - 1); return { x:PX + 14 + (i % 17) * 11, y:py + PH - 20 + Math.floor(i / 17) * 10 }; }
+    case 'fpmq': { const i = Math.min(r.qi, QCAP_F - 1); return { x:PX + 314 + (i % 22) * 11, y:py + PH - 20 + Math.floor(i / 22) * 10 }; }
+    case 'exec': case 'send':
+      if (cfg.arch === 'A' && r.slot >= 0) return cell(PX + 12, py + 44, r.slot, cfg.T);
+      if (cfg.arch === 'B' && r.worker) return cell(PX + 312, py + 44, r.worker.idx || 0, b.workers.length);
+      return { x:LBX + r.jx, y:H / 2 + 38 + r.jy };
+    case 'back': return { x:CLX + r.jx / 2, y:r.u.y + r.jy / 2 };
+    default: return { x:r.x, y:r.y };
+  }
+}
+function draw() {
+  const cv = $('cv'), g = cv.getContext('2d'), dpr = window.devicePixelRatio || 1;
+  const fg = css('--fg'), muted = css('--muted'), line = css('--line'), soft = css('--soft'), blue = css('--blue'), orange = css('--orange'), red = css('--red');
+  // buffer do canvas = largura exibida × devicePixelRatio, para o texto não ficar borrado ao ser esticado
+  const k = (Number(cv.clientWidth) || W) / W, bw = Math.round(W * k * dpr), bh = Math.round(H * k * dpr);
+  if (cv.width !== bw || cv.height !== bh) { cv.width = bw; cv.height = bh; }
+  g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, cv.width, cv.height);
+  g.setTransform(k * dpr, 0, 0, k * dpr, 0, 0);
+  g.font = '12px system-ui'; g.textBaseline = 'middle';
+  const txt = (s, x, y, c = fg, al = 'left', f) => { g.fillStyle = c; g.textAlign = al; if (f) g.font = f; g.fillText(s, x, y); g.font = '12px system-ui'; };
+  const rr_ = (x, y, w, h, fill, stroke, dash) => { g.beginPath(); g.roundRect(x, y, w, h, 8); if (fill) { g.fillStyle = fill; g.fill(); } if (stroke) { g.strokeStyle = stroke; g.setLineDash(dash || []); g.stroke(); g.setLineDash([]); } };
+  const drawCells = (x0, y0, n, busyOf, color, startingOf) => {
+    const L = gl(n);
+    for (let gi = 0; gi < L.groups; gi++) {
+      const lo = gi * L.k, hi = Math.min(n, lo + L.k), size = hi - lo, c = cell(x0, y0, lo, n), left = c.x - L.w / 2, top = c.y - L.w / 2, bsy = busyOf(lo, hi);
+      g.fillStyle = line; g.fillRect(left, top, L.w, L.w);
+      if (bsy > 0) { const h = L.w * bsy / size; g.fillStyle = color; g.fillRect(left, top + L.w - h, L.w, h); }
+      else if (startingOf && startingOf(lo, hi) > 0) { g.strokeStyle = muted; g.setLineDash([3, 3]); g.strokeRect(left, top, L.w, L.w); g.setLineDash([]); }
+    }
+  };
+  // clientes e LB
+  users.forEach(u => { g.beginPath(); g.arc(CLX, u.y, 11, 0, 7); g.fillStyle = u.color; g.fill(); txt('U' + (u.id + 1), CLX, u.y, '#fff', 'center', 'bold 10px system-ui'); });
+  txt('Clientes', CLX, 12, muted, 'center');
+  rr_(LBX - 42, H / 2 - 30, 84, 60, soft, line); txt('Balanceador', LBX, H / 2 - 8, fg, 'center', '11px system-ui'); txt({ rr:'round-robin', ip:'sticky', lc:'menos conexões' }[cfg.lb], LBX, H / 2 + 10, muted, 'center', '10px system-ui');
+  g.strokeStyle = line; g.lineWidth = 1; users.forEach(u => { g.beginPath(); g.moveTo(CLX + 12, u.y); g.lineTo(LBX - 42, H / 2); g.stroke(); });
+  // backends
+  backends.forEach(b => {
+    const py = panelY(b.i);
+    g.strokeStyle = line; g.beginPath(); g.moveTo(LBX + 42, H / 2); g.lineTo(PX, py + 70); g.stroke();
+    rr_(PX, py, PW, PH, soft, b.up ? line : red, b.up ? [] : [6, 4]);
+    txt('app' + (b.i + 1) + (b.up ? (b.listed ? '' : '  (no ar; o balanceador ainda não o usa)') : (b.listed ? '  (FORA DO AR; o balanceador ainda não notou)' : '  (FORA DO AR)')), PX + 10, py + 14, b.up ? fg : red, 'left', 'bold 13px system-ui');
+    if (!b.up) return;
+    if (cfg.session === 'file') {
+      txt('sessões em arquivo local', PX + PW - 12, py + 14, muted, 'right', '11px system-ui');
+      users.filter(u => u.where === b.i).forEach((u, k) => { g.beginPath(); g.arc(PX + PW - 18 - k * 15, py + 30, 6, 0, 7); g.fillStyle = u.color; g.fill(); });
+    }
+    const A = cfg.arch === 'A';
+    const LT = gl(cfg.T), kNote = L => L.k > 1 ? ` · 1 quadrado = ${L.k}` : '';
+    txt(A ? 'Apache prefork + mod_php' : 'Apache event', PX + 12, py + 32, muted);
+    drawCells(PX + 12, py + 44, cfg.T, (lo, hi) => A ? b.procSlots.slice(lo, hi).filter(Boolean).length : Math.max(0, Math.min(hi, b.thrBusy) - lo), A ? orange : blue);
+    txt(`${A ? 'processos' : 'threads'} ocupados: ${A ? b.procBusy : b.thrBusy}/${cfg.T}${kNote(LT)}`, PX + 12, py + 118, muted);
+    txt(`fila de espera: ${b.apacheQ.length}`, PX + 12, py + PH - 36, b.apacheQ.length ? orange : muted);
+    if (!A) {
+      const nw = b.workers.length, LW = gl(nw);
+      txt(`php-fpm · pm=${cfg.pm}`, PX + 312, py + 32, muted);
+      const cnt = (lo, hi, st) => { let c = 0; for (let i = lo; i < hi; i++) if (b.workers[i].state === st) c++; return c; };
+      drawCells(PX + 312, py + 44, nw, (lo, hi) => cnt(lo, hi, 'busy'), orange, (lo, hi) => cnt(lo, hi, 'starting'));
+      txt(`workers ocupados: ${cnt(0, nw, 'busy')}/${nw}${kNote(LW)}`, PX + 312, py + 118, muted);
+      txt(`max_children ${cfg.W}` + (b.maxReached ? ` · limite atingido ×${b.maxReached}` : ''), PX + 312, py + 132, b.maxReached ? orange : muted);
+      txt(`fila do FPM (listen queue): ${b.fpmQ.length}`, PX + 312, py + PH - 36, b.fpmQ.length ? orange : muted);
+    } else txt('o PHP roda dentro de cada processo', PX + 312, py + 70, muted);
+  });
+  // redis
+  const ry = H / 2 - 50, usingRedis = cfg.session === 'redis';
+  g.globalAlpha = usingRedis ? 1 : .35; rr_(RX - 20, ry, 130, 100, soft, redis.up ? line : red, redis.up ? [] : [6, 4]);
+  txt('Redis', RX + 45, ry + 18, fg, 'center', 'bold 13px system-ui'); txt(redis.up ? 'no ar' : 'FORA DO AR', RX + 45, ry + 40, redis.up ? muted : red, 'center'); txt('acessos: ' + redis.ops, RX + 45, ry + 62, muted, 'center'); txt(usingRedis ? 'sessões:' : '(não usado)', RX + 45, ry + 80, muted, 'center');
+  if (usingRedis) users.filter(u => u.where === 'redis').forEach((u, k, a) => { g.beginPath(); g.arc(RX + 45 + (k - (a.length - 1) / 2) * 15, ry + 92, 5, 0, 7); g.fillStyle = u.color; g.fill(); });
+  g.globalAlpha = 1;
+  lines = lines.filter(l => l.life > 0);
+  lines.forEach(l => { g.globalAlpha = Math.max(0, l.life); g.strokeStyle = blue; g.lineWidth = 2; g.beginPath(); g.moveTo(l.r.x, l.r.y); g.lineTo(RX - 20, ry + 50); g.stroke(); g.globalAlpha = 1; g.lineWidth = 1; });
+  // requisições
+  reqs.forEach(r => {
+    if ((r.stage === 'apacheq' && r.qi >= QCAP_A) || (r.stage === 'fpmq' && r.qi >= QCAP_F)) return;
+    if (r.stage === 'exec' && !gl(cfg.arch === 'A' ? cfg.T : (backends[r.b] ? backends[r.b].workers.length : 0)).big) return;
+    g.beginPath(); g.arc(r.x, r.y, 6, 0, 7);
+    if (r.noSess && r.stage !== 'err') { g.strokeStyle = r.color; g.lineWidth = 2.5; g.stroke(); g.lineWidth = 1; } else { g.fillStyle = r.stage === 'err' ? red : r.color; g.fill(); }
+    if (r.slow) { g.beginPath(); g.arc(r.x, r.y, 9, 0, 7); g.strokeStyle = fg; g.lineWidth = 1.5; g.stroke(); g.lineWidth = 1; }
+    if (r.stage === 'err') txt(r.msg, r.x + 10, r.y - 10, red, 'left', 'bold 11px system-ui');
+  });
+}
+function frame(now) {
+  const real = Math.min(50, now - (frame.last || now)); frame.last = now;
+  if (!paused) step(real * cfg.speed);
+  for (const b of backends) { b.apacheQ.forEach((r, i) => r.qi = i); b.fpmQ.forEach((r, i) => r.qi = i); b.workers.forEach((w, i) => w.idx = i); }
+  const a = 1 - Math.exp(-real / 90);
+  for (const r of reqs) { const t = target(r); r.x += (t.x - r.x) * a; r.y += (t.y - r.y) * a; }
+  lines.forEach(l => l.life -= real / 400);
+  draw(); requestAnimationFrame(frame);
+}
+
+// ---------- interface ----------
+document.addEventListener('click', e => {
+  const q = e.target.closest ? e.target.closest('.q') : null, box = q ? q.closest('.prm') : null;
+  document.querySelectorAll('.prm.open').forEach(x => { if (x !== box) x.classList.remove('open'); });
+  if (box) box.classList.toggle('open');
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') document.querySelectorAll('.prm.open').forEach(x => x.classList.remove('open'));
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.classList && e.target.classList.contains('q')) { e.preventDefault(); e.target.click(); }
+});
+const idxOf = (vals, v) => vals.reduce((bi, x, i) => Math.abs(x - v) < Math.abs(vals[bi] - v) ? i : bi, 0);
+function buildParams() {
+  const one = p => {
+    const v = cfg[p.k];
+    const input = p.opts ? `<select data-k="${p.k}">${p.opts.map(o => `<option value="${o[0]}"${String(v) === o[0] ? ' selected' : ''}>${o[1]}</option>`).join('')}</select>`
+      : p.vals ? `<input type="range" data-k="${p.k}" min="0" max="${p.vals.length - 1}" step="1" value="${idxOf(p.vals, v)}">`
+      : `<input type="range" data-k="${p.k}" min="${p.min}" max="${p.max}" step="${p.step}" value="${v}">`;
+    return `<div class="prm"><label>${p.label}${p.tip ? '<span class="q" role="button" tabindex="0" aria-label="Explicação">?</span>' : ''}${p.opts ? '' : `<span class="v" id="v-${p.k}">${v}</span>`}</label>${input}${p.tip ? `<span class="tipbox">${p.tip}</span>` : ''}</div>`;
+  };
+  $('params').innerHTML = GROUPS.map(([title, keys]) => `<div class="grp"><h3>${title}</h3><div class="grid">${keys.map(k => one(PARAMS.find(p => p.k === k))).join('')}</div></div>`).join('');
+  $('params').querySelectorAll('[data-k]').forEach(el => el.oninput = () => {
+    const p = PARAMS.find(x => x.k === el.dataset.k), isNum = typeof cfg[p.k] === 'number';
+    cfg[p.k] = p.vals ? p.vals[+el.value] : isNum ? +el.value : el.value; if (p.k === 'speed') cfg.speed = +el.value;
+    const v = $('v-' + p.k); if (v) v.textContent = cfg[p.k];
+    if (p.k === 'session') { users.forEach(u => { u.hits = 0; u.where = null; u.lostN = 0; u.last = null; }); }
+    if (p.struct) reset();
+    updateEnabled();
+  });
+  updateEnabled();
+}
+function buildKillers() {
+  $('killers').innerHTML = backends.map(b => `<button data-b="${b.i}" class="${b.up ? 'st-up' : 'st-down'}">${b.up ? 'Derrubar' : 'Subir'} app${b.i + 1}</button>`).join('');
+  $('killers').querySelectorAll('button').forEach(el => el.onclick = () => toggleBackend(+el.dataset.b));
+}
+function showStats() {
+  const l = stats.lat, avg = l.length ? l.reduce((a, b) => a + b, 0) / l.length : 0, p95 = l.length ? [...l].sort((a, b) => a - b)[Math.floor(l.length * .95)] : 0;
+  const f = ms => ms >= 1000 ? (ms / 1000).toFixed(2) + ' s' : Math.round(ms) + ' ms';
+  const items = [['em andamento', reqs.length], ['concluídas', stats.done], ['erros', stats.errors], ['vazão (req/s, últimos 5 s)', (stats.times.length / 5).toFixed(1)], ['latência média', l.length ? f(avg) : '-'], ['latência p95', l.length ? f(p95) : '-'], ['sessões perdidas', stats.lost]];
+  if (stats.noSess) items.push(['respostas 200 sem sessão', stats.noSess]);
+  const meaning = { '502': 'backend indisponível', '502/503': 'sem backend', '503': 'fila de conexões cheia', '504': 'tempo esgotado' };
+  Object.entries(stats.codes).sort().forEach(([c, n]) => items.push(['erro ' + c + ' · ' + (meaning[c] || ''), n]));
+  $('stats').innerHTML = items.map(([a, b]) => `<div><span>${a}</span><b${(a === 'erros' && b) || a.startsWith('erro ') ? ' style="color:var(--red)"' : ''}>${b}</b></div>`).join('');
+  $('sesscard').hidden = cfg.session === 'none'; // tabela só faz sentido com sessão
+  const app = i => 'app' + (i + 1), ago = t => { const s = Math.floor((T - t) / 1000); return s < 1 ? 'agora' : `há ${s} s`; };
+  const where = u => u.where === null ? '-' : u.where === 'redis' ? (redis.up ? 'Redis (compartilhado)' : '<span class="bad">Redis (fora do ar)</span>')
+    : `arquivo em ${app(u.where)}` + (backends[u.where] && !backends[u.where].up ? ' <span class="bad">(servidor fora do ar)</span>' : '');
+  const last = l => !l ? '-' : `${app(l.b)}, ${ago(l.t)}: ` + {
+    new:'<span class="ok">sessão criada</span>',
+    ok:'<span class="ok">sessão encontrada</span>',
+    lost:`<span class="bad">sessão perdida</span> (estava em ${app(l.from)})`,
+    nosess:'<span class="bad">sessão não lida (Redis fora)</span>: resposta 200, usuário aparece deslogado' }[l.kind];
+  $('sess').innerHTML = users.map(u => `<tr${u.last && (u.last.kind !== 'ok' && u.last.kind !== 'new') && T - u.last.t < 1500 ? ' class="flash"' : ''}><td><span class="dot" style="background:${u.color}"></span>U${u.id + 1}</td><td>${u.hits}</td><td>${where(u)}</td><td>${last(u.last)}</td><td>${u.lostN ? `<span class="bad">${u.lostN}</span>` : 0}</td></tr>`).join('');
+  $('redisBtn').textContent = redis.up ? 'Derrubar Redis' : 'Subir Redis';
+  $('redisBtn').className = redis.up ? 'st-up' : 'st-down';
+}
+const CATS = ['Mais comuns', 'Comuns', 'Didáticos'];
+$('presets').innerHTML = CATS.map(c => `<div class="pcat"><div class="pcat-t">${c}</div><div class="chips">${PRESETS.map((p, i) => p.cat === c ? `<button class="chip" data-i="${i}">${p.name}</button>` : '').join('')}</div></div>`).join('');
+$('presets').querySelectorAll('button').forEach(el => el.onclick = () => {
+  const p = PRESETS[+el.dataset.i]; Object.assign(cfg, { lb:'rr', redisMs:5, slowMs:3000, minSpare:1, maxSpare:3, timeout:30, detect:4, start:2, idleTimeout:6 }, p.cfg); redis.up = true;
+  document.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c === el));
+  $('desc').innerHTML = p.text + (p.actions ? '<div class="chips" style="margin-top:10px">' + p.actions.map((a, k) => `<button data-a="${k}">${a.label}</button>`).join('') + '</div>' : '');
+  if (p.actions) $('desc').querySelectorAll('button').forEach(b => b.onclick = () => p.actions[+b.dataset.a].run());
+  buildParams(); reset();
+});
+$('burst').onclick = () => { for (let i = 0; i < 20; i++) spawnReq(); };
+$('pause').onclick = () => { paused = !paused; $('pause').textContent = paused ? 'Continuar' : 'Pausar'; };
+$('reset').onclick = () => reset();
+$('redisBtn').onclick = () => { redis.up = !redis.up; };
+// ---------- leitura de configuração real ----------
+const NAMES = { arch:'arquitetura', T:'threads/processos do Apache', pm:'pm', W:'max_children', start:'start_servers', minSpare:'min_spare_servers', maxSpare:'max_spare_servers', idleTimeout:'process_idle_timeout', opcache:'OPcache', session:'sessão' };
+const NOT_SIMULATED = ['memory_limit', 'max_execution_time', 'request_terminate_timeout', 'listen.backlog', 'pm.max_requests', 'pm.status_path', 'opcache.memory_consumption', 'opcache.validate_timestamps', 'opcache.jit', 'opcache.max_accelerated_files'];
+function parseIni(text) {
+  const secs = [{ name:'', kv:{} }]; let cur = secs[0];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line[0] === ';' || line[0] === '#') continue;
+    const m = line.match(/^\[([^\]]+)\]$/);
+    if (m) { cur = { name:m[1], kv:{} }; secs.push(cur); continue; }
+    const eq = line.indexOf('='); if (eq < 0) continue;
+    let key = line.slice(0, eq).trim().toLowerCase(), val = line.slice(eq + 1).replace(/\s+;.*$/, '').trim().replace(/^["']|["']$/g, '');
+    const arr = key.match(/^php(?:_admin)?_(?:value|flag)\[(.+)\]$/); if (arr) key = arr[1];
+    cur.kv[key] = val;
+  }
+  return secs;
+}
+const LOADED_MPM = /^\s*LoadModule\s+mpm_(\w+)_module/im;
+// hint: MPM do LoadModule achado em outro arquivo enviado junto (ex.: httpd.conf + extra/httpd-mpm.conf)
+function parseApache(text, hint) {
+  text = text.split(/\r?\n/).filter(l => !/^\s*#/.test(l)).join('\n');
+  const blocks = [...text.matchAll(/<IfModule\s+mpm_(\w+)_module>([\s\S]*?)<\/IfModule>/gi)];
+  const own = text.match(LOADED_MPM), loaded = own ? own[1].toLowerCase() : hint || null;
+  // httpd-mpm.conf traz um bloco por MPM: usa o do MPM carregado, se houver; senão o primeiro
+  const mpm = loaded || (blocks.length ? blocks[0][1].toLowerCase() : null);
+  const blk = blocks.find(m => m[1].toLowerCase() === mpm) || (loaded ? null : blocks[0]);
+  const scope = blk ? blk[2] : text.replace(/<IfModule\s+mpm_\w+_module>[\s\S]*?<\/IfModule>/gi, '');
+  const num = re => { const m = scope.match(re); return m ? +m[1] : null; };
+  const maxW = num(/^\s*(?:MaxRequestWorkers|MaxClients)\s+(\d+)/im), tpc = num(/^\s*ThreadsPerChild\s+(\d+)/im), sl = num(/^\s*ServerLimit\s+(\d+)/im);
+  if (maxW === null && tpc === null && sl === null && !own && !blocks.length) return null;
+  return { mpm, maxW, tpc, sl, guessed: !loaded && blocks.length > 1 };
+}
+const toSeconds = v => { const m = String(v).trim().match(/^(\d+(?:\.\d+)?)\s*([smhd]?)$/i); if (!m) return null; return +m[1] * ({ '': 1, s:1, m:60, h:3600, d:86400 }[m[2].toLowerCase()]); };
+const isOff = v => /^(0|off|false|no|none)$/i.test(String(v).trim());
+function newReport() { return { applied:[], skipped:[], notes:[] }; }
+function setCfg(key, value, source, rep) {
+  const p = PARAMS.find(x => x.k === key); let v = value;
+  if (p && p.vals) v = p.vals[idxOf(p.vals, value)]; else if (p && p.min !== undefined) v = Math.min(p.max, Math.max(p.min, value));
+  cfg[key] = v;
+  rep.applied.push(`${source} → ${NAMES[key] || key} = ${v}` + (typeof value === 'number' && v !== value ? ` (o controle não tem ${value}; usei o valor mais próximo)` : ''));
+}
+function applyConfigText(name, text, rep) {
+  const secs = parseIni(text), flat = Object.assign({}, ...secs.map(x => x.kv));
+  const pools = secs.filter(x => 'pm' in x.kv || Object.keys(x.kv).some(k => k.startsWith('pm.')));
+  const pk = pools.length ? Object.assign({}, flat, pools[0].kv) : flat;
+  if (pools.length > 1) rep.notes.push(`${name}: há ${pools.length} pools; usei o primeiro (${pools[0].name ? '[' + pools[0].name + ']' : 'o que vem antes de qualquer [seção]'}).`);
+  let found = 0;
+  const get = k => k in pk ? pk[k] : undefined;
+  if (get('pm') !== undefined) { found++; const v = get('pm').toLowerCase(); if (['static', 'dynamic', 'ondemand'].includes(v)) setCfg('pm', v, `${name}: pm`, rep); else rep.notes.push(`${name}: pm = ${v} não é suportado.`); }
+  const nums = [['pm.max_children', 'W'], ['pm.start_servers', 'start'], ['pm.min_spare_servers', 'minSpare'], ['pm.max_spare_servers', 'maxSpare']];
+  for (const [k, key] of nums) if (get(k) !== undefined && !isNaN(+get(k))) { found++; setCfg(key, +get(k), `${name}: ${k}`, rep); }
+  if (get('pm.process_idle_timeout') !== undefined) { found++; const sec = toSeconds(get('pm.process_idle_timeout')); if (sec !== null) setCfg('idleTimeout', sec, `${name}: pm.process_idle_timeout`, rep); }
+  if (get('opcache.enable') !== undefined) { found++; setCfg('opcache', isOff(get('opcache.enable')) ? 'off' : 'on', `${name}: opcache.enable`, rep); }
+  if (get('session.save_handler') !== undefined) {
+    found++; const h = get('session.save_handler').toLowerCase();
+    if (h === 'files') setCfg('session', 'file', `${name}: session.save_handler`, rep);
+    else if (h === 'redis' || h === 'memcached' || h === 'memcache') { setCfg('session', 'redis', `${name}: session.save_handler`, rep); if (h !== 'redis') rep.notes.push(`${name}: ${h} tratado como armazenamento compartilhado (igual ao Redis).`); }
+    else rep.notes.push(`${name}: session.save_handler = ${h} não é simulado.`);
+  }
+  const ap = parseApache(text, rep.mpmHint);
+  if (ap) {
+    found++;
+    if (ap.guessed) rep.notes.push(`${name}: há blocos para vários MPMs e nenhum LoadModule; usei o primeiro (${ap.mpm}). Envie também o arquivo com o LoadModule do MPM.`);
+    if (ap.mpm === 'prefork') setCfg('arch', 'A', `${name}: MPM prefork`, rep);
+    else if (ap.mpm === 'event' || ap.mpm === 'worker') { setCfg('arch', 'B', `${name}: MPM ${ap.mpm}`, rep); if (ap.mpm === 'worker') rep.notes.push(`${name}: MPM worker tratado como event.`); }
+    const total = ap.maxW !== null ? ap.maxW : (ap.tpc !== null && ap.sl !== null ? ap.tpc * ap.sl : null);
+    if (total !== null) setCfg('T', total, `${name}: ${ap.maxW !== null ? 'MaxRequestWorkers' : 'ServerLimit × ThreadsPerChild'}`, rep);
+    else rep.notes.push(`${name}: sem MaxRequestWorkers; mantive o valor atual de threads/processos.`);
+  }
+  const ignored = NOT_SIMULATED.filter(k => k in flat || k in pk);
+  ignored.forEach(k => { if (!rep.skipped.includes(k)) rep.skipped.push(k); });
+  if (!found) rep.notes.push(`${name}: não encontrei nenhuma chave reconhecida (pm.*, opcache.enable, session.save_handler, MaxRequestWorkers…).`);
+}
+function finishConfig(rep) {
+  document.querySelectorAll('.chip').forEach(c => c.classList.remove('on'));
+  if (rep.applied.length) { buildParams(); reset(); }
+  const ul = a => `<ul>${a.map(x => `<li>${x.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</li>`).join('')}</ul>`;
+  $('cfgreport').innerHTML = (rep.applied.length ? `<b>Aplicado</b>${ul(rep.applied)}` : '')
+    + (rep.skipped.length ? `<b>Reconhecido, mas não simulado</b>${ul(rep.skipped)}` : '')
+    + (rep.notes.length ? `<b>Avisos</b>${ul(rep.notes)}` : '')
+    + (rep.applied.length ? '<span class="note">A simulação foi reiniciada com esses valores. Duração do PHP, carga e clientes lentos continuam nos controles abaixo.</span>' : '');
+}
+$('cfgfile').onchange = async e => {
+  const rep = newReport(), files = [];
+  for (const f of e.target.files) files.push([f.name, await f.text()]);
+  const lm = files.map(([, t]) => t.split(/\r?\n/).filter(l => !/^\s*#/.test(l)).join('\n').match(LOADED_MPM)).find(Boolean);
+  if (lm) rep.mpmHint = lm[1].toLowerCase();
+  for (const [name, text] of files) applyConfigText(name, text, rep);
+  finishConfig(rep); e.target.value = '';
+};
+
+buildParams(); reset(); setInterval(showStats, 250);
+if (typeof requestAnimationFrame === 'function') requestAnimationFrame(frame);
+</script>
+</body>
+</html>
