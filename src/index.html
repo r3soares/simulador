@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulador PHP: Apache, FPM e Redis</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1d2330; --muted:#69728a; --line:#d9dde7; --soft:#eef1f6; --blue:#1c7ed6; --orange:#e8590c; --purple:#7048e8; --green:#2f9e44; --red:#c92a2a;  --btn-ok:#1f6f2f; --btn-bad:#a32020;}
+  @media (prefers-color-scheme: dark) { :root { --bg:#12151c; --card:#1b2030; --fg:#e6e9f2; --muted:#98a1b8; --line:#2c3347; --soft:#242b40; --blue:#4dabf7; --orange:#ff8a4c; --purple:#9c86ff; --green:#51cf66; --red:#ff6b6b;  --btn-ok:#237a35; --btn-bad:#b02a2a;} }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui,sans-serif; }
+  main { max-width:1040px; margin:0 auto; padding:16px; }
+  h1 { font-size:20px; margin:0 0 14px; } .sub { color:var(--muted); margin:0 0 14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:12px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; }
+  button, select, input { font:inherit; border-radius:7px; border:1px solid var(--line); background:var(--card); color:var(--fg); padding:6px 10px; }
+  button { cursor:pointer; } button.p { background:var(--blue); color:#fff; border:0; } button.chip { background:var(--soft); }
+  button.chip.on { outline:2px solid var(--blue); }
+  button.st-up { background:var(--btn-ok); color:#fff; border:0; }
+  button.st-down { background:var(--btn-bad); color:#fff; border:0; }
+  #desc { margin:10px 0 0; color:var(--fg); } #desc b { color:var(--orange); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:10px 16px; }
+  .grid label { display:block; font-size:12px; color:var(--muted); } .grid .v { color:var(--fg); font-weight:600; float:right; }
+  .grid input[type=range] { width:100%; padding:0; } .grid select { width:100%; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:10px; }
+  .stats div { background:var(--soft); border-radius:8px; padding:8px 10px; } .stats span { display:block; font-size:11px; color:var(--muted); }
+  .stats b { font-size:20px; font-variant-numeric:tabular-nums; }
+  canvas { width:100%; display:block; }
+  table { border-collapse:collapse; width:100%; font-size:13px; } td, th { padding:4px 8px; border-bottom:1px solid var(--line); text-align:left; } th { color:var(--muted); font-weight:500; }
+  tr.flash td { background:color-mix(in srgb, var(--red) 14%, transparent); }
+  @media (max-width:480px) { td, th { padding:4px 5px; } }
+  .ok { color:var(--green); } .bad { color:var(--red); font-weight:600; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+  .leg span { margin-right:16px; font-size:12px; color:var(--muted); } .leg i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; }
+    textarea { width:100%; font:12px/1.4 ui-monospace,monospace; border:1px solid var(--line); border-radius:7px; background:var(--card); color:var(--fg); padding:8px; margin:8px 0; }
+  .rep ul { margin:4px 0 10px; padding-left:18px; } .rep b { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  .pcat { margin-bottom:12px; } .pcat-t { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:6px; }
+  .grp { background:var(--soft); border:1px solid var(--line); border-left:4px solid var(--blue); border-radius:10px; padding:12px 14px 14px; margin-bottom:14px; }
+  .grp:last-child { margin-bottom:0; }
+  .grp h3 { font-size:13px; text-transform:uppercase; letter-spacing:.07em; color:var(--blue); margin:0 0 12px; padding-bottom:8px; border-bottom:1px solid var(--line); }
+  .prm { position:relative; }
+  .prm .q { display:inline-block; width:14px; height:14px; border-radius:50%; background:var(--soft); color:var(--muted); font-size:10px; text-align:center; line-height:14px; margin-left:6px; cursor:pointer; user-select:none; }
+  .tipbox { display:none; position:absolute; left:0; bottom:100%; margin-bottom:4px; z-index:10; background:var(--fg); color:var(--bg); padding:8px 10px; border-radius:8px; font-size:12px; line-height:1.4; width:min(280px,86vw); box-shadow:0 4px 14px rgba(0,0,0,.25); pointer-events:none; }
+  .prm.open .tipbox { display:block; }
+  .prm.off label, .prm.off input, .prm.off select { opacity:.4; }
+  .prm.off input, .prm.off select { cursor:not-allowed; }
+  .errs { display:flex; flex-wrap:wrap; gap:8px; padding:0 8px 8px; }
+  .errs span { background:var(--soft); border-left:3px solid var(--red); border-radius:6px; padding:4px 10px; font-size:12px; color:var(--muted); }
+  .errs b { color:var(--red); margin-right:8px; }
+.note { color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Simulador: do cliente ao PHP</h1>
+  <div class="card">
+    <h2>Cenários prontos</h2>
+    <div class="chips" id="presets"></div>
+    <p id="desc">Escolha um cenário para ver uma situação típica explicada, ou ajuste os parâmetros mais abaixo.</p>
+  </div>
+
+  <div class="card">
+    <h2>Ações</h2>
+    <div class="chips">
+      <button class="p" id="burst">Rajada de 20 requisições</button>
+      <button id="pause">Pausar</button>
+      <button id="reset">Reiniciar</button>
+      <button id="redisBtn">Derrubar Redis</button>
+      <span id="killers" class="chips"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Estado</h2>
+    <div class="stats" id="stats"></div>
+  </div>
+
+  <div class="card" style="padding:8px">
+    <canvas id="cv" width="980" height="300"></canvas>
+    <div class="leg" style="padding:6px 8px"><span>bolinha = uma requisição</span><span><i style="background:var(--blue)"></i>thread do Apache ocupada</span><span><i style="background:var(--orange)"></i>worker/processo executando PHP</span><span><i style="background:var(--line)"></i>ocioso</span><span><i style="background:var(--red)"></i>erro</span><span>anel ao redor = cliente lento</span><span>bolinha vazada = resposta sem sessão</span></div>
+    <div class="errs">
+      <span><b>502</b>backend caído (conexão recusada ou interrompida)</span>
+      <span><b>502 / 503</b>nenhum backend disponível</span>
+      <span><b>503</b>fila de conexões do Apache cheia (backlog 511)</span>
+      <span><b>504</b>tempo esgotado esperando o PHP</span>
+    </div>
+  </div>
+
+  <div class="card" id="sesscard" hidden>
+    <h2>Sessões dos 6 usuários</h2>
+    <p class="note" style="margin:0 0 8px">Pense na sessão como o login ou o carrinho do usuário. A coluna <i>sessão</i> conta as requisições seguidas que encontraram a sessão; volta a 0 quando ela se perde (o usuário "é deslogado"), e <i>perdas</i> soma quantas vezes isso aconteceu.</p>
+    <div style="overflow-x:auto"><table><thead><tr><th>usuário</th><th title="requisições seguidas sem perder a sessão">sessão</th><th>guardada em</th><th>última requisição</th><th title="vezes que a sessão se perdeu">perdas</th></tr></thead><tbody id="sess"></tbody></table></div>
+  </div>
+
+  <div class="card">
+    <h2>Carregar configuração</h2>
+    <p class="note" style="margin:0 0 8px">Arquivos aceitos: <code>php.ini</code>, <code>www.conf</code> (pool do PHP-FPM), <code>httpd.conf</code> e <code>mpm_*.conf</code> (Apache).</p>
+    <input type="file" id="cfgfile" multiple accept=".ini,.conf,.cfg,.txt">
+    <div id="cfgreport" class="rep note" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Parâmetros (mexa durante a execução)</h2>
+    <div id="params"></div>
+    <p class="note" style="margin-bottom:0">Mudar arquitetura, número de backends, limite do Apache, max_children, pm ou start_servers reinicia a simulação. Os demais ajustes valem na hora.</p>
+  </div>
+</main>
+<!-- build:js (scripts/build.mjs injeta aqui o bundle de src/ui/main.js) -->
+</body>
+</html>
