@@ -3,10 +3,14 @@ import { createSim } from '../src/engine/sim.js';
 import { mulberry32 } from '../src/engine/rng.js';
 import { DEFAULTS } from '../src/model/params.js';
 
+// os testes partem da pilha mínima (sem sessão, sem banco) e cada um liga o que precisa;
+// o padrão da página (Redis e MySQL ligados) é testado à parte
+export const BASE = { ...DEFAULTS, session:'none', db:'none' };
+
 export const DT = 16; // passo de simulação usado nos testes (ms), parecido com um quadro de 60 Hz
 
 export function makeSim(over = {}, seed = 1) {
-  const cfg = { ...DEFAULTS, ...over };
+  const cfg = { ...BASE, ...over };
   const sim = createSim(cfg, { rng:mulberry32(seed) });
   sim.reset();
   return sim;

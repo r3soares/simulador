@@ -11,18 +11,21 @@ Na primeira vez, se o Chromium do Playwright não estiver instalado: `npx playwr
 
 ## Estratégia
 
+Os testes do motor partem de `BASE` (`test/helpers.js`): o padrão da página **sem sessão e sem banco**, e cada teste liga o que precisa. O padrão da página (Redis e MySQL ligados) tem teste próprio em `mysql.test.js`.
+
 O motor (`src/engine/`) não usa DOM nem `Math.random` direto: recebe um gerador com seed (`src/engine/rng.js`). Com a mesma seed, a simulação é **exatamente** a mesma, então os testes são determinísticos.
 
 | Arquivo | O que garante |
 |---|---|
 | `test/engine/parity.test.js` | O motor extraído reproduz `legacy/simulador.html` (o HTML original, rodado em `vm`) com a mesma seed, em 15 configurações e eventos. **Sai** quando o modelo mudar de propósito (ver abaixo). |
 | `test/engine/fpm.test.js` | Regras do PHP-FPM segundo `fpm_process_ctl.c`: taxa dobrando até 32, limite pelo déficit, `max_children`, contador de limite atingido, remoção de 1 por segundo, ondemand. |
+| `test/engine/mysql.test.js` | MySQL: soma do tempo das consultas, conexão não persistente, `max_connections` → 1040, persistentes (worker, prefork, remoção de worker, queda de backend), vazão limitada pelos núcleos, MySQL fora (2002/2013), lock (1205, fantasma com 504), destravar. |
 | `test/engine/rules.test.js` | Percurso e custos, OPcache, backlog → 503, 504 na fila e no fim do PHP, gargalo de threads, balanceadores, detecção de queda, 502/503, cliente lento A × B, sessões e Redis fora. |
-| `test/engine/combinations.test.js` | **Invariantes** (`test/invariants.js`) checadas a cada passo numa grade `arch × nb × lb × pm × session × slowPct × opcache × timeout` com 3 níveis de carga e eventos (rajada, queda e volta de backend e Redis), mais 60 configurações aleatórias. |
+| `test/engine/combinations.test.js` | **Invariantes** (`test/invariants.js`) checadas a cada passo numa grade `arch × nb × lb × pm × session × slowPct × opcache × timeout` com 3 níveis de carga e eventos (rajada, queda e volta de backend e Redis), mais 60 configurações aleatórias. Com MySQL: grade `arch × nb × pm × persistente × timeout × max_connections × lockWait` com lock, queda de backend e queda do MySQL, mais 40 configurações aleatórias. |
 | `test/engine/queueing.test.js` | Coerência com a teoria de filas: vazão ≈ min(chegadas, capacidade), latência com folga ≈ percurso + PHP, crescimento da fila saturada. |
-| `test/engine/presets.test.js` | O que o texto de cada um dos 14 cenários promete. |
-| `test/engine/config.test.js` | Leitura de configuração com os arquivos dos labs (`test/fixtures/`) e casos de borda. |
-| `test/e2e/page.spec.js` | A página: sem erros no console, cenários e ações, botões, tabela de sessões, habilitação de parâmetros, balões, upload de configuração, `devicePixelRatio`, 390 px sem rolagem lateral, tema escuro. |
+| `test/engine/presets.test.js` | O que o texto de cada um dos 21 cenários promete. |
+| `test/engine/config.test.js` | Leitura de configuração com os arquivos dos labs (`test/fixtures/`), `my.cnf` e casos de borda. |
+| `test/e2e/page.spec.js` | A página: sem erros no console, cenários e ações, botões, tabela de sessões, habilitação de parâmetros, balões, upload de configuração (inclusive `my.cnf`), botões do MySQL, ação que reinicia a simulação, `devicePixelRatio`, 390 px sem rolagem lateral, tema escuro. |
 
 ### Invariantes
 
@@ -36,7 +39,9 @@ Valem em qualquer configuração, a cada passo:
 - static sempre com `max_children` workers e contador de limite em 0;
 - 502 só depois de derrubar um backend; 502/503 só sem backend listado; nenhum outro código;
 - sessão perdida só com sessão em arquivo; resposta sem sessão só com o Redis fora;
-- latência nunca menor que 510 ms + 85% da duração do PHP.
+- latência nunca menor que 510 ms + 85% da duração do PHP;
+- MySQL: conexões abertas = donos de conexão (requisições, workers, processos) ≤ `max_connections`; pico ≥ abertas; consultas executando ≤ núcleos; fila só com núcleo cheio; filas do banco com o estágio certo; MySQL fora sem conexões nem consultas; espera de lock só com a linha travada; sem banco, nenhuma atividade no MySQL; 2002/2013 só depois de derrubar o MySQL, 1205 só com lock; cada 500 corresponde a um erro do MySQL;
+- fantasma (504 enviado, PHP ainda no banco) não segura thread e só existe nos estágios do banco; conservação desconta os fantasmas.
 
 ## Reproduzir uma falha
 

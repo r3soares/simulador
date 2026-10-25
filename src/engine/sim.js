@@ -6,17 +6,21 @@ export const BACKLOG = 511;  // ListenBacklog padrão do Apache
 export const NUSERS = 6;
 // tempos fixos do percurso (ms): ida ao balanceador, ida ao backend, envio normal, volta ao cliente
 export const HOP = 120, SEND = 20, BACK = 250, OPCACHE_COST = 120, ERR_LINGER = 700;
+// estágios em que a requisição está no MySQL: fila de núcleos, executando, esperando lock de linha
+export const DB_STAGES = ['dbq', 'db', 'dblock'];
 
 export function createSim(cfg, { rng = Math.random, on = () => {} } = {}) {
   let T = 0, reqs = [], users = [], backends = [], redis = { up:true, ops:0 }, seq = 0, rr = 0, nextArr = 0, stats;
+  let db = { up:true, locked:false, conns:0, maxUsed:0, active:[], queue:[], lockQ:[], ops:0 };
 
-  function resetStats() { stats = { done:0, errors:0, lost:0, noSess:0, lat:[], times:[], codes:{}, spawned:0 }; }
+  function resetStats() { stats = { done:0, errors:0, lost:0, noSess:0, lat:[], times:[], codes:{}, spawned:0, dbErr:{ '1040':0, '2002':0, '1205':0, '2013':0 } }; }
   function newBackend(i) {
-    const b = { i, up:true, thrBusy:0, apacheQ:[], fpmQ:[], workers:[], procSlots:Array(cfg.T).fill(null), procBusy:0, warm:false, pmTimer:0, spawnN:1, maxReached:0, atMax:false, listed:true, flipAt:null };
+    const b = { i, up:true, thrBusy:0, apacheQ:[], fpmQ:[], workers:[], procSlots:Array(cfg.T).fill(null), procConn:Array(cfg.T).fill(false), procBusy:0, warm:false, pmTimer:0, spawnN:1, maxReached:0, atMax:false, listed:true, flipAt:null };
     initWorkers(b, cfg, T); return b;
   }
   function reset() {
     T = 0; reqs = []; nextArr = 0; rr = 0; resetStats(); redis = { up:redis.up, ops:0 };
+    db = { up:db.up, locked:db.locked, conns:0, maxUsed:0, active:[], queue:[], lockQ:[], ops:0 };
     users = Array.from({ length:NUSERS }, (_, i) => ({ id:i, hits:0, where:null, lostN:0, last:null }));
     backends = Array.from({ length:cfg.nb }, (_, i) => newBackend(i));
     on('reset');
@@ -38,8 +42,60 @@ export function createSim(cfg, { rng = Math.random, on = () => {} } = {}) {
   }
   function load(b) { return b.thrBusy + b.procBusy + b.apacheQ.length + b.fpmQ.length; }
 
+  // ---- MySQL ----
+  // conexão persistente: pertence ao worker do FPM (B) ou ao processo do prefork (A) e sobrevive ao fim do script
+  const persist = () => cfg.dbPersist === 'on';
+  const hasPConn = (r, b) => cfg.arch === 'B' ? r.worker.conn : b.procConn[r.slot];
+  function setPConn(r, b) { if (cfg.arch === 'B') r.worker.conn = true; else b.procConn[r.slot] = true; }
+  // abre (ou reaproveita) a conexão no início do script; devolve false se o PHP recebeu exceção (→ 500)
+  function connect(r, b) {
+    if (persist() && hasPConn(r, b)) return true;
+    if (!db.up) { fail(r, '500', '2002'); return false; }
+    if (db.conns >= cfg.dbMaxConn) { fail(r, '500', '1040'); return false; }
+    db.conns++; db.maxUsed = Math.max(db.maxUsed, db.conns);
+    if (persist()) setPConn(r, b); else r.conn = true;
+    return true;
+  }
+  function releaseConn(r) { if (r.conn) { r.conn = false; db.conns--; } }
+  function runQuery(r) { r.stage = 'db'; r.timer = cfg.dbQ * cfg.dbMs * (0.85 + rng() * 0.3); db.active.push(r); }
+  function toDb(r) {
+    if (!db.up) return fail(r, '500', '2013');
+    db.ops++;
+    if (db.locked) { r.stage = 'dblock'; r.timer = cfg.lockWait * 1000; db.lockQ.push(r); }
+    else if (db.active.length < cfg.dbCores) runQuery(r);
+    else { r.stage = 'dbq'; r.timer = Infinity; db.queue.push(r); }
+  }
+  function freeCore(r) {
+    const i = db.active.indexOf(r); if (i < 0) return;
+    db.active.splice(i, 1);
+    while (db.active.length < cfg.dbCores && db.queue.length) runQuery(db.queue.shift());
+  }
+  function leaveDb(r) {
+    const i = db.lockQ.indexOf(r); if (i >= 0) db.lockQ.splice(i, 1);
+    db.queue = db.queue.filter(x => x !== r); freeCore(r);
+  }
+  // o cliente já recebeu 504, mas o PHP continuava esperando o MySQL: agora termina sem resposta
+  function endGhost(r) {
+    const b = backends[r.b];
+    leaveDb(r); releaseConn(r);
+    if (r.worker) { const w = r.worker; w.state = 'idle'; w.req = null; w.idleSince = T; r.worker = null; }
+    if (b) freeProc(r, b);
+    r.dead = true;
+  }
+  // passou do timeout do servidor web enquanto o PHP espera o banco: o cliente recebe 504 agora,
+  // o Apache libera a thread, mas o worker do FPM (ou o processo do prefork) e a conexão continuam presos
+  function makeGhost(r) {
+    r.ghost = true; stats.errors++; stats.codes['504'] = (stats.codes['504'] || 0) + 1;
+    freeThread(r, backends[r.b]);
+  }
+  function toSend(r, b) {
+    if (cfg.arch === 'B') { const w = r.worker; w.state = 'idle'; w.req = null; w.idleSince = T; r.worker = null; freeThread(r, b); }
+    r.stage = 'send'; r.timer = r.slow ? cfg.slowMs : SEND;
+  }
+
   function startExec(r, b) {
     r.stage = 'exec';
+    if (cfg.db === 'mysql' && !connect(r, b)) return;
     let t = cfg.exec * (0.85 + rng() * 0.3);
     if (cfg.opcache === 'off') t += OPCACHE_COST; else if (!b.warm) { t += OPCACHE_COST; b.warm = true; }
     const u = r.u;
@@ -67,14 +123,17 @@ export function createSim(cfg, { rng = Math.random, on = () => {} } = {}) {
     r.thread = false; b.thrBusy--;
     while (b.thrBusy < cfg.T && b.apacheQ.length) { const n = b.apacheQ.shift(); b.thrBusy++; n.thread = true; n.stage = 'fpmq'; n.timer = Infinity; b.fpmQ.push(n); }
   }
-  function fail(r, msg) {
+  // dbCode: erro do MySQL que virou exceção no PHP (só com msg '500')
+  function fail(r, msg, dbCode) {
     const b = backends[r.b];
+    leaveDb(r); releaseConn(r);
     if (b) {
       if (r.worker) { r.worker.state = 'idle'; r.worker.req = null; r.worker.idleSince = T; r.worker = null; }
       b.apacheQ = b.apacheQ.filter(x => x !== r); b.fpmQ = b.fpmQ.filter(x => x !== r);
       freeThread(r, b); freeProc(r, b);
     }
     stats.errors++; stats.codes[msg] = (stats.codes[msg] || 0) + 1; r.stage = 'err'; r.timer = ERR_LINGER; r.msg = msg;
+    if (dbCode) { stats.dbErr[dbCode]++; r.msg = `${msg} (${dbCode})`; }
   }
   function arrive(r, b) {
     r.tArr = T;
@@ -93,8 +152,16 @@ export function createSim(cfg, { rng = Math.random, on = () => {} } = {}) {
       case 'toBackend': if (!b.up) return fail(r, '502'); arrive(r, b); break;
       case 'exec':
         if (T - r.tArr > cfg.timeout * 1000) return fail(r, '504');
-        if (cfg.arch === 'B') { const w = r.worker; w.state = 'idle'; w.req = null; w.idleSince = T; r.worker = null; freeThread(r, b); }
-        r.stage = 'send'; r.timer = r.slow ? cfg.slowMs : SEND; break;
+        if (cfg.db === 'mysql') return toDb(r);
+        toSend(r, b); break;
+      case 'db':
+        if (r.ghost) return endGhost(r);
+        leaveDb(r); releaseConn(r);
+        if (T - r.tArr > cfg.timeout * 1000) return fail(r, '504');
+        toSend(r, b); break;
+      case 'dblock': // innodb_lock_wait_timeout venceu: ERROR 1205, exceção no PHP
+        if (r.ghost) { stats.dbErr['1205']++; return endGhost(r); } // o erro existe (log do PHP), mas o cliente já recebeu 504
+        return fail(r, '500', '1205');
       case 'send': if (cfg.arch === 'A') freeProc(r, b); r.stage = 'back'; r.timer = BACK; break;
       case 'back': {
         const lat = T - r.t0; stats.done++; if (r.noSess) stats.noSess++; stats.lat.push(lat); if (stats.lat.length > 200) stats.lat.shift(); stats.times.push(T); r.dead = true; break;
@@ -110,16 +177,22 @@ export function createSim(cfg, { rng = Math.random, on = () => {} } = {}) {
     }
     for (const r of reqs.slice()) { r.timer -= dt; if (r.timer <= 0 && !r.dead) advance(r); }
     reqs = reqs.filter(r => !r.dead);
-    backends.forEach(b => maintain(b, dt, cfg, T, startExec));
+    backends.forEach(b => maintain(b, dt, cfg, T, startExec, w => { if (w.conn) db.conns--; }));
     for (const b of backends) if (b.flipAt !== null && T >= b.flipAt) { b.listed = b.up; b.flipAt = null; }
-    for (const r of reqs) if (!r.dead && (r.stage === 'apacheq' || r.stage === 'fpmq') && T - r.tArr > cfg.timeout * 1000) fail(r, '504');
+    for (const r of reqs) {
+      if (r.dead || T - r.tArr <= cfg.timeout * 1000) continue;
+      if (r.stage === 'apacheq' || r.stage === 'fpmq') fail(r, '504');
+      else if (!r.ghost && DB_STAGES.includes(r.stage)) makeGhost(r);
+    }
     stats.times = stats.times.filter(t => T - t < 5000);
   }
   function toggleBackend(i) {
     const b = backends[i];
     if (b.up) {
       // em A e em B quem entrega a resposta é o Apache deste backend: quem está em 'send' também falha
-      for (const r of reqs.slice()) if (r.b === i && ['toBackend', 'apacheq', 'fpmq', 'exec', 'send'].includes(r.stage)) fail(r, '502');
+      for (const r of reqs.slice()) if (r.b === i && !r.dead && ['toBackend', 'apacheq', 'fpmq', 'exec', 'send', ...DB_STAGES].includes(r.stage)) { if (r.ghost) endGhost(r); else fail(r, '502'); }
+      // as conexões persistentes dos processos que morreram caem junto
+      db.conns -= b.workers.filter(w => w.conn).length + b.procConn.filter(Boolean).length; b.procConn.fill(false);
       b.up = false; b.apacheQ = []; b.fpmQ = []; b.workers = []; b.thrBusy = 0; b.procBusy = 0; b.procSlots.fill(null);
     } else { b.up = true; b.warm = false; initWorkers(b, cfg, T); }
     if (cfg.detect === 0) { b.listed = b.up; b.flipAt = null; } else b.flipAt = T + cfg.detect * 1000;
@@ -127,11 +200,28 @@ export function createSim(cfg, { rng = Math.random, on = () => {} } = {}) {
   }
   function burst(n = 20) { for (let i = 0; i < n; i++) spawnReq(); }
   function setRedis(up) { redis.up = up; }
+  function setDb(up) {
+    if (db.up && !up) {
+      // quem estava no banco perde a conexão no meio da consulta (CR_SERVER_LOST, 2013);
+      // db.up = false antes: um processo liberado aqui que puxar a próxima da fila já recebe 2002
+      db.up = false; db.queue = []; db.lockQ = []; db.active = [];
+      for (const r of reqs.slice()) if (!r.dead && DB_STAGES.includes(r.stage)) { if (r.ghost) endGhost(r); else fail(r, '500', '2013'); }
+      // todas as conexões caem, inclusive as persistentes ociosas
+      reqs.forEach(r => { r.conn = false; });
+      backends.forEach(b => { b.workers.forEach(w => { w.conn = false; }); b.procConn.fill(false); });
+      db.conns = 0;
+    }
+    db.up = up;
+  }
+  function setDbLock(on) {
+    db.locked = on;
+    if (!on) { const q = db.lockQ; db.lockQ = []; for (const r of q) { if (db.active.length < cfg.dbCores) runQuery(r); else { r.stage = 'dbq'; r.timer = Infinity; db.queue.push(r); } } }
+  }
 
   resetStats();
   return {
-    cfg, reset, step, spawnReq, burst, toggleBackend, setRedis, resetSessions,
+    cfg, reset, step, spawnReq, burst, toggleBackend, setRedis, setDb, setDbLock, resetSessions,
     get T() { return T; }, get reqs() { return reqs; }, get users() { return users; }, get backends() { return backends; },
-    get redis() { return redis; }, get stats() { return stats; },
+    get redis() { return redis; }, get db() { return db; }, get stats() { return stats; },
   };
 }

@@ -4,9 +4,10 @@ Simulação didática de uma pilha web PHP, desenhada no navegador:
 
 ```
 clientes → balanceador → [backend 1..3: Apache event + PHP-FPM | Apache prefork + mod_php] → Redis (sessões)
+                                                                                           → MySQL (conexões, consultas, locks)
 ```
 
-Mostra filas, saturação, timeouts, quedas de backend, sessões e a gerência de workers do PHP-FPM (static, dynamic, ondemand). **Tudo é simulado**: os números servem para comparar situações, não são benchmark. As regras seguem a documentação e o código-fonte oficiais ([docs/referencias.md](docs/referencias.md)).
+Mostra filas, saturação, timeouts, quedas de backend, sessões, a gerência de workers do PHP-FPM (static, dynamic, ondemand) e o MySQL: `max_connections` e *Too many connections*, conexões persistentes, consulta sem índice, N+1, lock de linha e o banco fora do ar. **Tudo é simulado**: os números servem para comparar situações, não são benchmark. As regras seguem a documentação e o código-fonte oficiais ([docs/referencias.md](docs/referencias.md)).
 
 ## Usar
 
@@ -32,8 +33,8 @@ npm run check:links # links das referências ainda respondem? (rede)
 
 | Caminho | Conteúdo |
 |---|---|
-| `src/engine/` | Motor sem DOM: `sim.js` (percurso, filas, falhas, sessões), `fpm.js` (gerência de workers), `config.js` (leitura de php.ini, pool do FPM e Apache), `rng.js` (gerador com seed). |
-| `src/model/` | Parâmetros (valores, balões, grupos, quando se aplicam) e os 14 cenários. |
+| `src/engine/` | Motor sem DOM: `sim.js` (percurso, filas, falhas, sessões), `fpm.js` (gerência de workers), `config.js` (leitura de php.ini, pool do FPM, Apache e my.cnf), `rng.js` (gerador com seed). |
+| `src/model/` | Parâmetros (valores, balões, grupos, quando se aplicam) e os 21 cenários. |
 | `src/ui/` | Canvas, painéis HTML e laço de animação. |
 | `src/index.html` | Marcação e CSS; o build injeta o JavaScript. |
 | `scripts/` | `build.mjs` (esbuild → arquivo único) e `check-links.mjs`. |
@@ -45,7 +46,7 @@ npm run check:links # links das referências ainda respondem? (rede)
 
 - [Funcionalidades](docs/funcionalidades.md): cenários, ações, painéis, leitura de configuração e cada parâmetro, com link para a diretiva oficial.
 - [Modelo](docs/modelo.md): como a simulação funciona, constantes e simplificações que podem enganar.
-- [Referências oficiais](docs/referencias.md): `.ini` do PHP, PHP-FPM, phpredis, Apache, nginx, HAProxy, Linux, RFC 9110 e frameworks.
+- [Referências oficiais](docs/referencias.md): `.ini` do PHP, PDO/mysqli, PHP-FPM, phpredis, Apache, nginx, HAProxy, Linux, RFC 9110, frameworks e MySQL 8.4.
 - [Vereditos da revisão](docs/fontes.md): cada afirmação técnica conferida.
 - [Testes](docs/testes.md): estratégia, invariantes, como reproduzir uma falha.
 - [Roadmap](docs/roadmap.md): melhorias e pendências.

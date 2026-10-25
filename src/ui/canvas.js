@@ -1,9 +1,22 @@
 // Desenho da simulação no <canvas>. Guarda só o que é visual (posição e jitter das bolinhas, linhas do Redis);
 // o estado da simulação vem do motor.
 export const COLORS = ['#1c7ed6', '#e8590c', '#2f9e44', '#7048e8', '#d6336c', '#f08c00'];
-const W = 980, PX = 250, PW = 570, PH = 185, STEP = 205, CLX = 55, LBX = 170, RX = 860;
+const W = 980, PX = 250, PW = 570, PH = 185, STEP = 205, CLX = 55, LBX = 170;
 export const H = 40 + 3 * STEP + 5; // altura fixa (cabem 3 backends): evita que a página se desloque ao mudar o nº de backends
 const QCAP_A = 34, QCAP_F = 44;
+// coluna da direita (Redis em cima, MySQL embaixo): centrada no espaço depois dos backends e na altura;
+// card sem uso fica compacto (só o título) e o par é recentralizado
+const BX = PX + PW + (W - PX - PW - 140) / 2, BW = 140, BCX = BX + BW / 2, IX = BX + 12, IW = BW - 24, GAP = 16;
+const RH = 118, OFF_H = 62, CORE = 14, QCAP_DB = 30, QCAP_LOCK = 10;
+// a altura do MySQL acompanha as linhas de núcleos (8 por linha); qy = rótulo da fila, ly = rótulo do lock (relativos ao topo)
+function side(cfg) {
+  const qy = 106 + Math.ceil(cfg.dbCores / 8) * CORE + 22, ly = qy + 62;
+  const rh = cfg.session === 'redis' ? RH : OFF_H, mh = cfg.db === 'mysql' ? ly + 30 : OFF_H, ry = (H - rh - GAP - mh) / 2;
+  return { ry, rh, my:ry + rh + GAP, mh, qy, ly };
+}
+// grades centradas na largura interna do card
+const center = (n, step) => IX + (IW - Math.min(n, IW / step | 0) * step) / 2;
+const coreXY = (i, cfg, my) => ({ x:center(cfg.dbCores, CORE) + (i % 8) * CORE + 6, y:my + 106 + Math.floor(i / 8) * CORE + 6 });
 const userY = id => 40 + id * (H - 80) / 5;
 
 // grade de células: até 24 unidades = quadrados grandes; acima disso, quadrados pequenos e, passando de 144, cada quadrado agrupa k unidades
@@ -28,6 +41,9 @@ export function createCanvas(cv, sim) {
         if (cfg.arch === 'A' && r.slot >= 0) return cell(PX + 12, py + 44, r.slot, cfg.T);
         if (cfg.arch === 'B' && r.worker) return cell(PX + 312, py + 44, widx.get(r.worker) || 0, b.workers.length);
         return { x:LBX + v.jx, y:H / 2 + 38 + v.jy };
+      case 'db': return coreXY(qi.get(r) || 0, cfg, side(cfg).my);
+      case 'dbq': { const i = Math.min(qi.get(r) || 0, QCAP_DB - 1), L = side(cfg); return { x:center(10, 11) + (i % 10) * 11 + 5, y:L.my + L.qy + 18 + Math.floor(i / 10) * 12 }; }
+      case 'dblock': { const i = Math.min(qi.get(r) || 0, QCAP_LOCK - 1), L = side(cfg); return { x:center(10, 11) + i * 11 + 5, y:L.my + L.ly + 16 }; }
       case 'back': return { x:CLX + v.jx / 2, y:userY(r.u.id) + v.jy / 2 };
       default: return { x:v.x, y:v.y };
     }
@@ -36,6 +52,7 @@ export function createCanvas(cv, sim) {
   // move as bolinhas em direção ao alvo (suavizado pelo tempo real decorrido)
   function animate(real) {
     for (const b of sim.backends) { b.apacheQ.forEach((r, i) => qi.set(r, i)); b.fpmQ.forEach((r, i) => qi.set(r, i)); b.workers.forEach((w, i) => widx.set(w, i)); }
+    const db = sim.db; db.active.forEach((r, i) => qi.set(r, i)); db.queue.forEach((r, i) => qi.set(r, i)); db.lockQ.forEach((r, i) => qi.set(r, i));
     const a = 1 - Math.exp(-real / 90);
     for (const r of sim.reqs) { const v = V(r), t = target(r, v); v.x += (t.x - v.x) * a; v.y += (t.y - v.y) * a; }
     lines.forEach(l => l.life -= real / 400);
@@ -97,20 +114,45 @@ export function createCanvas(cv, sim) {
       } else txt('o PHP roda dentro de cada processo', PX + 312, py + 70, muted);
     });
     // redis
-    const ry = H / 2 - 50, usingRedis = cfg.session === 'redis';
-    g.globalAlpha = usingRedis ? 1 : .35; rr_(RX - 20, ry, 130, 100, soft, redis.up ? line : red, redis.up ? [] : [6, 4]);
-    txt('Redis', RX + 45, ry + 18, fg, 'center', 'bold 13px system-ui'); txt(redis.up ? 'no ar' : 'FORA DO AR', RX + 45, ry + 40, redis.up ? muted : red, 'center'); txt('acessos: ' + redis.ops, RX + 45, ry + 62, muted, 'center'); txt(usingRedis ? 'sessões:' : '(não usado)', RX + 45, ry + 80, muted, 'center');
-    if (usingRedis) users.filter(u => u.where === 'redis').forEach((u, k, a) => { g.beginPath(); g.arc(RX + 45 + (k - (a.length - 1) / 2) * 15, ry + 92, 5, 0, 7); g.fillStyle = COLORS[u.id]; g.fill(); });
+    const { ry, rh, my, mh, qy, ly } = side(cfg), usingRedis = cfg.session === 'redis';
+    g.globalAlpha = usingRedis ? 1 : .35; rr_(BX, ry, BW, rh, soft, redis.up ? line : red, redis.up ? [] : [6, 4]);
+    txt('Redis', BCX, ry + 20, fg, 'center', 'bold 13px system-ui');
+    if (!usingRedis) txt('(não usado)', BCX, ry + 42, muted, 'center');
+    else {
+      txt(redis.up ? 'no ar' : 'FORA DO AR', BCX, ry + 40, redis.up ? muted : red, 'center');
+      txt('acessos: ' + redis.ops, BCX, ry + 60, muted, 'center'); txt('sessões:', BCX, ry + 80, muted, 'center');
+      users.filter(u => u.where === 'redis').forEach((u, k, a) => { g.beginPath(); g.arc(BCX + (k - (a.length - 1) / 2) * 15, ry + 100, 5, 0, 7); g.fillStyle = COLORS[u.id]; g.fill(); });
+    }
+    g.globalAlpha = 1;
+    // mysql
+    const db = sim.db, usingDb = cfg.db === 'mysql';
+    g.globalAlpha = usingDb ? 1 : .35; rr_(BX, my, BW, mh, soft, db.up ? line : red, db.up ? [] : [6, 4]);
+    txt('MySQL', BCX, my + 20, fg, 'center', 'bold 13px system-ui');
+    if (!usingDb) txt('(não usado)', BCX, my + 42, muted, 'center');
+    else {
+      txt(db.up ? 'no ar' : 'FORA DO AR', BCX, my + 40, db.up ? muted : red, 'center');
+      const full = db.conns >= cfg.dbMaxConn;
+      txt(`conexões ${db.conns}/${cfg.dbMaxConn}`, BCX, my + 62, full ? red : muted, 'center');
+      g.fillStyle = line; g.fillRect(IX, my + 72, IW, 6);
+      g.fillStyle = full ? red : blue; g.fillRect(IX, my + 72, IW * Math.min(1, db.conns / cfg.dbMaxConn), 6);
+      txt(`executando ${db.active.length}/${cfg.dbCores}`, BCX, my + 96, muted, 'center');
+      for (let i = 0; i < cfg.dbCores; i++) { const c = coreXY(i, cfg, my); g.fillStyle = i < db.active.length ? orange : line; g.fillRect(c.x - 6, c.y - 6, 12, 12); }
+      txt(`fila no banco: ${db.queue.length}`, BCX, my + qy, db.queue.length ? orange : muted, 'center');
+      txt(db.locked ? `linha travada: ${db.lockQ.length}` : 'sem lock', BCX, my + ly, db.locked ? red : muted, 'center', db.locked ? 'bold 12px system-ui' : '12px system-ui');
+    }
     g.globalAlpha = 1;
     lines = lines.filter(l => l.life > 0);
-    lines.forEach(l => { const v = V(l.r); g.globalAlpha = Math.max(0, l.life); g.strokeStyle = blue; g.lineWidth = 2; g.beginPath(); g.moveTo(v.x, v.y); g.lineTo(RX - 20, ry + 50); g.stroke(); g.globalAlpha = 1; g.lineWidth = 1; });
+    lines.forEach(l => { const v = V(l.r); g.globalAlpha = Math.max(0, l.life); g.strokeStyle = blue; g.lineWidth = 2; g.beginPath(); g.moveTo(v.x, v.y); g.lineTo(BX, ry + rh / 2); g.stroke(); g.globalAlpha = 1; g.lineWidth = 1; });
     // requisições
     reqs.forEach(r => {
       if ((r.stage === 'apacheq' && (qi.get(r) || 0) >= QCAP_A) || (r.stage === 'fpmq' && (qi.get(r) || 0) >= QCAP_F)) return;
+      if ((r.stage === 'dbq' && (qi.get(r) || 0) >= QCAP_DB) || (r.stage === 'dblock' && (qi.get(r) || 0) >= QCAP_LOCK)) return;
       if (r.stage === 'exec' && !gl(cfg.arch === 'A' ? cfg.T : (backends[r.b] ? backends[r.b].workers.length : 0)).big) return;
       const v = V(r), color = COLORS[r.u.id];
-      g.beginPath(); g.arc(v.x, v.y, 6, 0, 7);
-      if (r.noSess && r.stage !== 'err') { g.strokeStyle = color; g.lineWidth = 2.5; g.stroke(); g.lineWidth = 1; } else { g.fillStyle = r.stage === 'err' ? red : color; g.fill(); }
+      g.beginPath(); g.arc(v.x, v.y, r.stage === 'db' ? 5 : 6, 0, 7);
+      // fantasma: o cliente já recebeu 504, mas o PHP continua esperando o MySQL
+      if (r.ghost) { g.fillStyle = muted; g.globalAlpha = .55; g.fill(); g.globalAlpha = 1; g.setLineDash([2, 2]); g.strokeStyle = fg; g.stroke(); g.setLineDash([]); }
+      else if (r.noSess && r.stage !== 'err') { g.strokeStyle = color; g.lineWidth = 2.5; g.stroke(); g.lineWidth = 1; } else { g.fillStyle = r.stage === 'err' ? red : color; g.fill(); }
       if (r.slow) { g.beginPath(); g.arc(v.x, v.y, 9, 0, 7); g.strokeStyle = fg; g.lineWidth = 1.5; g.stroke(); g.lineWidth = 1; }
       if (r.stage === 'err') txt(r.msg, v.x + 10, v.y - 10, red, 'left', 'bold 11px system-ui');
     });

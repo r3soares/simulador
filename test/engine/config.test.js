@@ -83,3 +83,15 @@ test('parseIni: seções, aspas e comentários', () => {
 test('toSeconds: sufixos do php-fpm (s, m, h, d)', () => {
   assert.deepEqual(['10', '10s', '2m', '1h', '1d', 'x'].map(toSeconds), [10, 10, 120, 3600, 86400, null]);
 });
+
+test('my.cnf: max-connections (com hífen) e innodb_lock_wait_timeout ligam o MySQL; outras chaves reconhecidas', () => {
+  const r = read('my.cnf');
+  assert.deepEqual(r.changes, { db:'mysql', dbMaxConn:300, lockWait:10 });
+  assert.deepEqual(r.skipped.sort(), ['innodb_buffer_pool_size', 'long_query_time', 'wait_timeout']);
+});
+
+test('my.cnf: valores fora do controle viram o mais próximo, com aviso', () => {
+  const r = read(['x.cnf', '[mysqld]\nmax_connections = 160\ninnodb_lock_wait_timeout = 3600\n']);
+  assert.equal(r.changes.dbMaxConn, 151); assert.equal(r.changes.lockWait, 120);
+  assert.match(r.applied.join(), /não tem 3600/);
+});

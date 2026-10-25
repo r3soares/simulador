@@ -13,7 +13,8 @@ export function initWorkers(b, cfg, T) {
 }
 
 // Avança dt ms no backend b: cria/remove workers e entrega requisições da fila aos ociosos.
-export function maintain(b, dt, cfg, T, startExec) {
+// onRemove(w) é chamado para cada worker encerrado (ex.: soltar a conexão persistente com o MySQL).
+export function maintain(b, dt, cfg, T, startExec, onRemove = () => {}) {
   if (!b.up || cfg.arch !== 'B') return;
   for (const w of b.workers) if (w.state === 'starting' && T >= w.readyAt) { w.state = 'idle'; w.idleSince = T; }
   b.pmTimer += dt;
@@ -29,11 +30,11 @@ export function maintain(b, dt, cfg, T, startExec) {
           b.spawnN = Math.min(b.spawnN * 2, MAX_SPAWN_RATE);
         } else { if (!b.atMax) { b.maxReached++; b.atMax = true; } b.spawnN = 1; }
       } else { b.spawnN = 1; b.atMax = false; }
-      if (idle.length > cfg.maxSpare) { const w = idle.sort((a, c) => a.idleSince - c.idleSince)[0]; b.workers.splice(b.workers.indexOf(w), 1); b.spawnN = 1; }
+      if (idle.length > cfg.maxSpare) { const w = idle.sort((a, c) => a.idleSince - c.idleSince)[0]; b.workers.splice(b.workers.indexOf(w), 1); onRemove(w); b.spawnN = 1; }
     } else if (cfg.pm === 'ondemand') {
       // como no php-fpm: no máximo um worker removido por passagem (1 s)
       const w = idle.filter(w => T - w.idleSince > cfg.idleTimeout * 1000).sort((a, c) => a.idleSince - c.idleSince)[0];
-      if (w) b.workers.splice(b.workers.indexOf(w), 1);
+      if (w) { b.workers.splice(b.workers.indexOf(w), 1); onRemove(w); }
     }
   }
   if (cfg.pm === 'ondemand') {

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Simulador PHP: Apache, FPM e Redis</title>
+<title>Simulador PHP: Apache, FPM, Redis e MySQL</title>
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --fg:#1d2330; --muted:#69728a; --line:#d9dde7; --soft:#eef1f6; --blue:#1c7ed6; --orange:#e8590c; --purple:#7048e8; --green:#2f9e44; --red:#c92a2a;  --btn-ok:#1f6f2f; --btn-bad:#a32020;}
   @media (prefers-color-scheme: dark) { :root { --bg:#12151c; --card:#1b2030; --fg:#e6e9f2; --muted:#98a1b8; --line:#2c3347; --soft:#242b40; --blue:#4dabf7; --orange:#ff8a4c; --purple:#9c86ff; --green:#51cf66; --red:#ff6b6b;  --btn-ok:#237a35; --btn-bad:#b02a2a;} }
@@ -67,6 +67,8 @@
       <button id="pause">Pausar</button>
       <button id="reset">Reiniciar</button>
       <button id="redisBtn">Derrubar Redis</button>
+      <button id="dbBtn" hidden>Derrubar MySQL</button>
+      <button id="lockBtn" hidden>Travar uma linha (transação longa)</button>
       <span id="killers" class="chips"></span>
     </div>
   </div>
@@ -78,12 +80,13 @@
 
   <div class="card" style="padding:8px">
     <canvas id="cv" width="980" height="300"></canvas>
-    <div class="leg" style="padding:6px 8px"><span>bolinha = uma requisição</span><span><i style="background:var(--blue)"></i>thread do Apache ocupada</span><span><i style="background:var(--orange)"></i>worker/processo executando PHP</span><span><i style="background:var(--line)"></i>ocioso</span><span><i style="background:var(--red)"></i>erro</span><span>anel ao redor = cliente lento</span><span>bolinha vazada = resposta sem sessão</span></div>
+    <div class="leg" style="padding:6px 8px"><span>bolinha = uma requisição</span><span><i style="background:var(--blue)"></i>thread do Apache ocupada</span><span><i style="background:var(--orange)"></i>worker/processo executando PHP</span><span><i style="background:var(--line)"></i>ocioso</span><span><i style="background:var(--red)"></i>erro</span><span>anel ao redor = cliente lento</span><span>bolinha vazada = resposta sem sessão</span><span>bolinha cinza tracejada = o cliente já recebeu 504, mas o PHP ainda espera o MySQL</span></div>
     <div class="errs">
       <span><b>502</b>backend caído (conexão recusada ou interrompida)</span>
       <span><b>502 / 503</b>nenhum backend disponível</span>
       <span><b>503</b>fila de conexões do Apache cheia (backlog 511)</span>
       <span><b>504</b>tempo esgotado esperando o PHP</span>
+      <span><b>500</b>exceção do MySQL no PHP (1040, 2002, 1205, 2013)</span>
     </div>
   </div>
 
@@ -95,15 +98,15 @@
 
   <div class="card">
     <h2>Carregar configuração</h2>
-    <p class="note" style="margin:0 0 8px">Arquivos aceitos: <code>php.ini</code>, <code>www.conf</code> (pool do PHP-FPM), <code>httpd.conf</code> e <code>mpm_*.conf</code> (Apache).</p>
-    <input type="file" id="cfgfile" multiple accept=".ini,.conf,.cfg,.txt">
+    <p class="note" style="margin:0 0 8px">Arquivos aceitos: <code>php.ini</code>, <code>www.conf</code> (pool do PHP-FPM), <code>httpd.conf</code> e <code>mpm_*.conf</code> (Apache), <code>my.cnf</code> (MySQL).</p>
+    <input type="file" id="cfgfile" multiple accept=".ini,.conf,.cfg,.cnf,.txt">
     <div id="cfgreport" class="rep note" style="margin-top:10px"></div>
   </div>
 
   <div class="card">
     <h2>Parâmetros (mexa durante a execução)</h2>
     <div id="params"></div>
-    <p class="note" style="margin-bottom:0">Mudar arquitetura, número de backends, limite do Apache, max_children, pm ou start_servers reinicia a simulação. Os demais ajustes valem na hora.</p>
+    <p class="note" style="margin-bottom:0">Mudar arquitetura, número de backends, limite do Apache, max_children, pm, start_servers, banco ou conexões persistentes reinicia a simulação. Os demais ajustes valem na hora.</p>
   </div>
 </main>
 <script>
@@ -118,7 +121,8 @@
     const n = cfg2.pm === "static" ? cfg2.W : Math.min(cfg2.start, cfg2.W);
     for (let i = 0; i < n; i++) b.workers.push({ state: "idle", req: null, idleSince: T });
   }
-  function maintain(b, dt, cfg2, T, startExec) {
+  function maintain(b, dt, cfg2, T, startExec, onRemove = () => {
+  }) {
     if (!b.up || cfg2.arch !== "B") return;
     for (const w of b.workers) if (w.state === "starting" && T >= w.readyAt) {
       w.state = "idle";
@@ -148,11 +152,15 @@
         if (idle.length > cfg2.maxSpare) {
           const w = idle.sort((a, c) => a.idleSince - c.idleSince)[0];
           b.workers.splice(b.workers.indexOf(w), 1);
+          onRemove(w);
           b.spawnN = 1;
         }
       } else if (cfg2.pm === "ondemand") {
         const w = idle.filter((w2) => T - w2.idleSince > cfg2.idleTimeout * 1e3).sort((a, c) => a.idleSince - c.idleSince)[0];
-        if (w) b.workers.splice(b.workers.indexOf(w), 1);
+        if (w) {
+          b.workers.splice(b.workers.indexOf(w), 1);
+          onRemove(w);
+        }
       }
     }
     if (cfg2.pm === "ondemand") {
@@ -186,14 +194,16 @@
   var BACK = 250;
   var OPCACHE_COST = 120;
   var ERR_LINGER = 700;
+  var DB_STAGES = ["dbq", "db", "dblock"];
   function createSim(cfg2, { rng = Math.random, on = () => {
   } } = {}) {
     let T = 0, reqs = [], users = [], backends = [], redis = { up: true, ops: 0 }, seq = 0, rr = 0, nextArr = 0, stats;
+    let db = { up: true, locked: false, conns: 0, maxUsed: 0, active: [], queue: [], lockQ: [], ops: 0 };
     function resetStats() {
-      stats = { done: 0, errors: 0, lost: 0, noSess: 0, lat: [], times: [], codes: {}, spawned: 0 };
+      stats = { done: 0, errors: 0, lost: 0, noSess: 0, lat: [], times: [], codes: {}, spawned: 0, dbErr: { "1040": 0, "2002": 0, "1205": 0, "2013": 0 } };
     }
     function newBackend(i) {
-      const b = { i, up: true, thrBusy: 0, apacheQ: [], fpmQ: [], workers: [], procSlots: Array(cfg2.T).fill(null), procBusy: 0, warm: false, pmTimer: 0, spawnN: 1, maxReached: 0, atMax: false, listed: true, flipAt: null };
+      const b = { i, up: true, thrBusy: 0, apacheQ: [], fpmQ: [], workers: [], procSlots: Array(cfg2.T).fill(null), procConn: Array(cfg2.T).fill(false), procBusy: 0, warm: false, pmTimer: 0, spawnN: 1, maxReached: 0, atMax: false, listed: true, flipAt: null };
       initWorkers(b, cfg2, T);
       return b;
     }
@@ -204,6 +214,7 @@
       rr = 0;
       resetStats();
       redis = { up: redis.up, ops: 0 };
+      db = { up: db.up, locked: db.locked, conns: 0, maxUsed: 0, active: [], queue: [], lockQ: [], ops: 0 };
       users = Array.from({ length: NUSERS }, (_, i) => ({ id: i, hits: 0, where: null, lostN: 0, last: null }));
       backends = Array.from({ length: cfg2.nb }, (_, i) => newBackend(i));
       on("reset");
@@ -245,8 +256,100 @@
     function load(b) {
       return b.thrBusy + b.procBusy + b.apacheQ.length + b.fpmQ.length;
     }
+    const persist = () => cfg2.dbPersist === "on";
+    const hasPConn = (r, b) => cfg2.arch === "B" ? r.worker.conn : b.procConn[r.slot];
+    function setPConn(r, b) {
+      if (cfg2.arch === "B") r.worker.conn = true;
+      else b.procConn[r.slot] = true;
+    }
+    function connect(r, b) {
+      if (persist() && hasPConn(r, b)) return true;
+      if (!db.up) {
+        fail(r, "500", "2002");
+        return false;
+      }
+      if (db.conns >= cfg2.dbMaxConn) {
+        fail(r, "500", "1040");
+        return false;
+      }
+      db.conns++;
+      db.maxUsed = Math.max(db.maxUsed, db.conns);
+      if (persist()) setPConn(r, b);
+      else r.conn = true;
+      return true;
+    }
+    function releaseConn(r) {
+      if (r.conn) {
+        r.conn = false;
+        db.conns--;
+      }
+    }
+    function runQuery(r) {
+      r.stage = "db";
+      r.timer = cfg2.dbQ * cfg2.dbMs * (0.85 + rng() * 0.3);
+      db.active.push(r);
+    }
+    function toDb(r) {
+      if (!db.up) return fail(r, "500", "2013");
+      db.ops++;
+      if (db.locked) {
+        r.stage = "dblock";
+        r.timer = cfg2.lockWait * 1e3;
+        db.lockQ.push(r);
+      } else if (db.active.length < cfg2.dbCores) runQuery(r);
+      else {
+        r.stage = "dbq";
+        r.timer = Infinity;
+        db.queue.push(r);
+      }
+    }
+    function freeCore(r) {
+      const i = db.active.indexOf(r);
+      if (i < 0) return;
+      db.active.splice(i, 1);
+      while (db.active.length < cfg2.dbCores && db.queue.length) runQuery(db.queue.shift());
+    }
+    function leaveDb(r) {
+      const i = db.lockQ.indexOf(r);
+      if (i >= 0) db.lockQ.splice(i, 1);
+      db.queue = db.queue.filter((x) => x !== r);
+      freeCore(r);
+    }
+    function endGhost(r) {
+      const b = backends[r.b];
+      leaveDb(r);
+      releaseConn(r);
+      if (r.worker) {
+        const w = r.worker;
+        w.state = "idle";
+        w.req = null;
+        w.idleSince = T;
+        r.worker = null;
+      }
+      if (b) freeProc(r, b);
+      r.dead = true;
+    }
+    function makeGhost(r) {
+      r.ghost = true;
+      stats.errors++;
+      stats.codes["504"] = (stats.codes["504"] || 0) + 1;
+      freeThread(r, backends[r.b]);
+    }
+    function toSend(r, b) {
+      if (cfg2.arch === "B") {
+        const w = r.worker;
+        w.state = "idle";
+        w.req = null;
+        w.idleSince = T;
+        r.worker = null;
+        freeThread(r, b);
+      }
+      r.stage = "send";
+      r.timer = r.slow ? cfg2.slowMs : SEND;
+    }
     function startExec(r, b) {
       r.stage = "exec";
+      if (cfg2.db === "mysql" && !connect(r, b)) return;
       let t = cfg2.exec * (0.85 + rng() * 0.3);
       if (cfg2.opcache === "off") t += OPCACHE_COST;
       else if (!b.warm) {
@@ -307,8 +410,10 @@
         b.fpmQ.push(n);
       }
     }
-    function fail(r, msg) {
+    function fail(r, msg, dbCode) {
       const b = backends[r.b];
+      leaveDb(r);
+      releaseConn(r);
       if (b) {
         if (r.worker) {
           r.worker.state = "idle";
@@ -326,6 +431,10 @@
       r.stage = "err";
       r.timer = ERR_LINGER;
       r.msg = msg;
+      if (dbCode) {
+        stats.dbErr[dbCode]++;
+        r.msg = `${msg} (${dbCode})`;
+      }
     }
     function arrive(r, b) {
       r.tArr = T;
@@ -367,17 +476,22 @@
           break;
         case "exec":
           if (T - r.tArr > cfg2.timeout * 1e3) return fail(r, "504");
-          if (cfg2.arch === "B") {
-            const w = r.worker;
-            w.state = "idle";
-            w.req = null;
-            w.idleSince = T;
-            r.worker = null;
-            freeThread(r, b);
-          }
-          r.stage = "send";
-          r.timer = r.slow ? cfg2.slowMs : SEND;
+          if (cfg2.db === "mysql") return toDb(r);
+          toSend(r, b);
           break;
+        case "db":
+          if (r.ghost) return endGhost(r);
+          leaveDb(r);
+          releaseConn(r);
+          if (T - r.tArr > cfg2.timeout * 1e3) return fail(r, "504");
+          toSend(r, b);
+          break;
+        case "dblock":
+          if (r.ghost) {
+            stats.dbErr["1205"]++;
+            return endGhost(r);
+          }
+          return fail(r, "500", "1205");
         case "send":
           if (cfg2.arch === "A") freeProc(r, b);
           r.stage = "back";
@@ -412,18 +526,29 @@
         if (r.timer <= 0 && !r.dead) advance(r);
       }
       reqs = reqs.filter((r) => !r.dead);
-      backends.forEach((b) => maintain(b, dt, cfg2, T, startExec));
+      backends.forEach((b) => maintain(b, dt, cfg2, T, startExec, (w) => {
+        if (w.conn) db.conns--;
+      }));
       for (const b of backends) if (b.flipAt !== null && T >= b.flipAt) {
         b.listed = b.up;
         b.flipAt = null;
       }
-      for (const r of reqs) if (!r.dead && (r.stage === "apacheq" || r.stage === "fpmq") && T - r.tArr > cfg2.timeout * 1e3) fail(r, "504");
+      for (const r of reqs) {
+        if (r.dead || T - r.tArr <= cfg2.timeout * 1e3) continue;
+        if (r.stage === "apacheq" || r.stage === "fpmq") fail(r, "504");
+        else if (!r.ghost && DB_STAGES.includes(r.stage)) makeGhost(r);
+      }
       stats.times = stats.times.filter((t) => T - t < 5e3);
     }
     function toggleBackend(i) {
       const b = backends[i];
       if (b.up) {
-        for (const r of reqs.slice()) if (r.b === i && ["toBackend", "apacheq", "fpmq", "exec", "send"].includes(r.stage)) fail(r, "502");
+        for (const r of reqs.slice()) if (r.b === i && !r.dead && ["toBackend", "apacheq", "fpmq", "exec", "send", ...DB_STAGES].includes(r.stage)) {
+          if (r.ghost) endGhost(r);
+          else fail(r, "502");
+        }
+        db.conns -= b.workers.filter((w) => w.conn).length + b.procConn.filter(Boolean).length;
+        b.procConn.fill(false);
         b.up = false;
         b.apacheQ = [];
         b.fpmQ = [];
@@ -448,6 +573,44 @@
     function setRedis(up) {
       redis.up = up;
     }
+    function setDb(up) {
+      if (db.up && !up) {
+        db.up = false;
+        db.queue = [];
+        db.lockQ = [];
+        db.active = [];
+        for (const r of reqs.slice()) if (!r.dead && DB_STAGES.includes(r.stage)) {
+          if (r.ghost) endGhost(r);
+          else fail(r, "500", "2013");
+        }
+        reqs.forEach((r) => {
+          r.conn = false;
+        });
+        backends.forEach((b) => {
+          b.workers.forEach((w) => {
+            w.conn = false;
+          });
+          b.procConn.fill(false);
+        });
+        db.conns = 0;
+      }
+      db.up = up;
+    }
+    function setDbLock(on2) {
+      db.locked = on2;
+      if (!on2) {
+        const q = db.lockQ;
+        db.lockQ = [];
+        for (const r of q) {
+          if (db.active.length < cfg2.dbCores) runQuery(r);
+          else {
+            r.stage = "dbq";
+            r.timer = Infinity;
+            db.queue.push(r);
+          }
+        }
+      }
+    }
     resetStats();
     return {
       cfg: cfg2,
@@ -457,6 +620,8 @@
       burst,
       toggleBackend,
       setRedis,
+      setDb,
+      setDbLock,
       resetSessions,
       get T() {
         return T;
@@ -473,6 +638,9 @@
       get redis() {
         return redis;
       },
+      get db() {
+        return db;
+      },
       get stats() {
         return stats;
       }
@@ -480,9 +648,10 @@
   }
 
   // src/model/params.js
-  var DEFAULTS = { arch: "B", nb: 1, lb: "rr", T: 8, W: 4, pm: "static", exec: 800, opcache: "on", slowPct: 0, slowMs: 3e3, session: "none", redisMs: 5, rate: 3, speed: 1, minSpare: 1, maxSpare: 3, timeout: 30, detect: 4, start: 2, idleTimeout: 6 };
+  var DEFAULTS = { arch: "B", nb: 1, lb: "rr", T: 8, W: 4, pm: "static", exec: 800, opcache: "on", slowPct: 0, slowMs: 3e3, session: "redis", redisMs: 5, rate: 3, speed: 1, minSpare: 1, maxSpare: 3, timeout: 30, detect: 4, start: 2, idleTimeout: 6, db: "mysql", dbQ: 5, dbMs: 10, dbCores: 4, dbMaxConn: 151, dbPersist: "off", lockWait: 50 };
   var TVALS = [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 16, 20, 24, 25, 32, 48, 50, 64, 75, 100, 128, 150, 200, 256, 300, 400, 500, 512, 600];
   var WVALS = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 30, 32, 40, 48, 50, 64, 80, 100, 128, 150, 200, 256, 300, 400, 500, 512];
+  var CONNVALS = [5, 10, 20, 30, 50, 75, 100, 151, 200, 300, 500, 1e3, 2e3];
   var RATEVALS = [0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40, 50, 75, 100, 150, 200, 300, 400, 500, 750, 1e3];
   var PARAMS = [
     { k: "arch", tip: "Como o PHP roda: dentro do processo do Apache (prefork + mod_php) ou em um servi\xE7o separado (Apache event + PHP-FPM).", label: "Arquitetura", opts: [["B", "B \xB7 Apache event + PHP-FPM"], ["A", "A \xB7 Apache prefork + mod_php"]], struct: 1 },
@@ -495,12 +664,19 @@
     { k: "minSpare", tip: "pm.min_spare_servers: m\xEDnimo de workers ociosos. Abaixo disso o FPM cria mais, aumentando o ritmo a cada segundo (modo dynamic).", label: "pm.min_spare_servers", min: 1, max: 32, step: 1 },
     { k: "maxSpare", tip: "pm.max_spare_servers: m\xE1ximo de workers ociosos. Acima disso o FPM remove um por vez (modo dynamic).", label: "pm.max_spare_servers", min: 1, max: 64, step: 1 },
     { k: "idleTimeout", tip: "pm.process_idle_timeout: tempo ocioso depois do qual um worker \xE9 removido (modo ondemand).", label: "pm.process_idle_timeout (s)", min: 1, max: 60, step: 1 },
-    { k: "exec", tip: "Quanto tempo o script PHP leva (consultas, APIs, c\xE1lculo). Ele ocupa um worker durante todo esse tempo.", label: "Dura\xE7\xE3o do PHP (ms)", min: 50, max: 3e3, step: 50 },
+    { k: "exec", tip: "Quanto tempo o script PHP leva (APIs, c\xE1lculo e, sem MySQL ligado, tamb\xE9m as consultas). Ele ocupa um worker durante todo esse tempo. Com o MySQL ligado, o tempo das consultas \xE9 somado \xE0 parte.", label: "Dura\xE7\xE3o do PHP (ms)", min: 50, max: 3e3, step: 50 },
     { k: "opcache", tip: "O OPcache guarda o c\xF3digo j\xE1 compilado em mem\xF3ria. Desligado, cada requisi\xE7\xE3o recompila os arquivos (aqui +120 ms, valor ilustrativo).", label: "OPcache", opts: [["on", "ligado"], ["off", "desligado"]] },
     { k: "slowPct", tip: "Percentual de clientes com conex\xE3o lenta ou resposta grande, que demoram para receber a resposta.", label: "Clientes lentos (%)", min: 0, max: 100, step: 10 },
     { k: "slowMs", tip: "Quanto tempo esses clientes lentos levam para receber a resposta.", label: "Tempo para o cliente lento receber (ms)", min: 500, max: 8e3, step: 500 },
     { k: "session", tip: "Onde ficam as sess\xF5es: nenhuma, em arquivo no pr\xF3prio backend (se a pr\xF3xima requisi\xE7\xE3o cair em outro, a sess\xE3o se perde) ou em um Redis compartilhado.", label: "Sess\xE3o", opts: [["none", "sem sess\xE3o"], ["file", "arquivo local do backend"], ["redis", "Redis compartilhado"]] },
     { k: "redisMs", tip: "Tempo de cada acesso ao Redis. Cada requisi\xE7\xE3o faz dois (ler e gravar a sess\xE3o).", label: "Lat\xEAncia do Redis (ms)", min: 1, max: 100, step: 1 },
+    { k: "db", tip: "Banco de dados compartilhado por todos os backends. Com MySQL, cada requisi\xE7\xE3o abre uma conex\xE3o no in\xEDcio do script, roda o PHP e depois faz as consultas. Se o MySQL recusa a conex\xE3o ou devolve erro, o PDO e o mysqli lan\xE7am exce\xE7\xE3o e, sem tratamento, a resposta \xE9 500.", label: "Banco", opts: [["none", "sem banco"], ["mysql", "MySQL compartilhado"]], struct: 1 },
+    { k: "dbQ", tip: "Quantas consultas cada requisi\xE7\xE3o faz. Uma p\xE1gina com N+1 (um SELECT para a lista e mais um por item) faz dezenas ou centenas.", label: "Consultas por requisi\xE7\xE3o", min: 1, max: 200, step: 1 },
+    { k: "dbMs", tip: "Tempo de cada consulta dentro do MySQL. Com \xEDndice, poucos ms; sem \xEDndice o MySQL l\xEA a tabela inteira e o tempo cresce com o tamanho dela.", label: "Tempo de cada consulta (ms)", min: 1, max: 500, step: 1 },
+    { k: "dbCores", tip: "Quantas consultas o MySQL executa ao mesmo tempo (pense em n\xFAcleos de CPU/disco). As demais esperam numa fila interna. Simplifica\xE7\xE3o: no MySQL real cada conex\xE3o tem uma thread e elas disputam a CPU.", label: "Consultas simult\xE2neas no MySQL (n\xFAcleos)", min: 1, max: 32, step: 1 },
+    { k: "dbMaxConn", tip: "max_connections: m\xE1ximo de conex\xF5es simult\xE2neas (padr\xE3o 151). Passou disso, a conex\xE3o \xE9 recusada com ERROR 1040 Too many connections e o PHP responde 500. Conte todos os workers de todos os backends.", label: "max_connections", vals: CONNVALS },
+    { k: "dbPersist", tip: "Conex\xE3o persistente (PDO::ATTR_PERSISTENT ou p: no mysqli): o worker n\xE3o fecha a conex\xE3o no fim do script e a reaproveita. Cada worker vivo segura uma conex\xE3o, mesmo ocioso.", label: "Conex\xF5es persistentes", opts: [["off", "n\xE3o (abre e fecha a cada requisi\xE7\xE3o)"], ["on", "sim (uma por worker/processo)"]], struct: 1 },
+    { k: "lockWait", tip: "innodb_lock_wait_timeout: quanto uma escrita espera por uma linha travada por outra transa\xE7\xE3o (padr\xE3o 50 s). Depois disso, ERROR 1205 e o PHP responde 500. Leituras simples (SELECT sem FOR UPDATE) n\xE3o esperam lock.", label: "innodb_lock_wait_timeout (s)", min: 1, max: 120, step: 1 },
     { k: "rate", tip: "Requisi\xE7\xF5es chegando por segundo (a carga). A chegada \xE9 aleat\xF3ria, com essa m\xE9dia.", label: "Requisi\xE7\xF5es por segundo", vals: RATEVALS },
     { k: "timeout", tip: "Tempo m\xE1ximo de espera pelo PHP (como fastcgi_read_timeout no nginx ou ProxyTimeout/Timeout no Apache com FPM). Passou disso, a requisi\xE7\xE3o recebe 504. Nos servidores reais o padr\xE3o costuma ser 60 s. Com mod_php (arquitetura A) o Apache n\xE3o gera 504: quem daria o 504 \xE9 o balanceador, e o pr\xF3prio PHP para em max_execution_time.", label: "Timeout do servidor web (s)", min: 5, max: 120, step: 5 },
     { k: "detect", tip: "Tempo at\xE9 o balanceador notar que um backend caiu. Nesse intervalo ele ainda envia requisi\xE7\xF5es ao backend morto (502). Aqui n\xE3o h\xE1 nova tentativa. O nginx, por padr\xE3o (proxy_next_upstream error timeout), refaz em outro backend quando a conex\xE3o \xE9 recusada e o cliente quase n\xE3o v\xEA erro; o HAProxy repete no mesmo servidor (retries) e s\xF3 muda de servidor com option redispatch.", label: "Tempo at\xE9 o balanceador notar backend ca\xEDdo (s)", min: 0, max: 10, step: 1 },
@@ -510,6 +686,7 @@
     ["Servidor web e balanceador", ["arch", "nb", "lb", "T"]],
     ["PHP-FPM", ["pm", "W", "start", "minSpare", "maxSpare", "idleTimeout"]],
     ["Aplica\xE7\xE3o PHP", ["exec", "opcache", "session", "redisMs"]],
+    ["MySQL", ["db", "dbQ", "dbMs", "dbCores", "dbMaxConn", "dbPersist", "lockWait"]],
     ["Carga e clientes", ["rate", "slowPct", "slowMs"]],
     ["Timeouts e falhas", ["timeout", "detect"]],
     ["Simula\xE7\xE3o", ["speed"]]
@@ -523,13 +700,40 @@
     idleTimeout: (c) => c.arch === "B" && c.pm === "ondemand",
     lb: (c) => c.nb > 1,
     slowMs: (c) => c.slowPct > 0,
-    redisMs: (c) => c.session === "redis"
+    redisMs: (c) => c.session === "redis",
+    dbQ: (c) => c.db === "mysql",
+    dbMs: (c) => c.db === "mysql",
+    dbCores: (c) => c.db === "mysql",
+    dbMaxConn: (c) => c.db === "mysql",
+    dbPersist: (c) => c.db === "mysql",
+    lockWait: (c) => c.db === "mysql"
   };
   var idxOf = (vals, v) => vals.reduce((bi, x, i) => Math.abs(x - v) < Math.abs(vals[bi] - v) ? i : bi, 0);
 
   // src/engine/config.js
-  var NAMES = { arch: "arquitetura", T: "threads/processos do Apache", pm: "pm", W: "max_children", start: "start_servers", minSpare: "min_spare_servers", maxSpare: "max_spare_servers", idleTimeout: "process_idle_timeout", opcache: "OPcache", session: "sess\xE3o" };
-  var NOT_SIMULATED = ["memory_limit", "max_execution_time", "request_terminate_timeout", "listen.backlog", "pm.max_requests", "pm.status_path", "opcache.memory_consumption", "opcache.validate_timestamps", "opcache.jit", "opcache.max_accelerated_files"];
+  var NAMES = { arch: "arquitetura", T: "threads/processos do Apache", pm: "pm", W: "max_children", start: "start_servers", minSpare: "min_spare_servers", maxSpare: "max_spare_servers", idleTimeout: "process_idle_timeout", opcache: "OPcache", session: "sess\xE3o", db: "banco", dbMaxConn: "max_connections", lockWait: "innodb_lock_wait_timeout" };
+  var NOT_SIMULATED = [
+    "memory_limit",
+    "max_execution_time",
+    "request_terminate_timeout",
+    "listen.backlog",
+    "pm.max_requests",
+    "pm.status_path",
+    "opcache.memory_consumption",
+    "opcache.validate_timestamps",
+    "opcache.jit",
+    "opcache.max_accelerated_files",
+    "mysqli.allow_persistent",
+    "mysqli.max_persistent",
+    "wait_timeout",
+    "max_user_connections",
+    "innodb_buffer_pool_size",
+    "thread_cache_size",
+    "long_query_time",
+    "innodb_thread_concurrency",
+    "back_log",
+    "lock_wait_timeout"
+  ];
   function parseIni(text) {
     const secs = [{ name: "", kv: {} }];
     let cur = secs[0];
@@ -620,6 +824,20 @@
         if (h !== "redis") rep.notes.push(`${name}: ${h} tratado como armazenamento compartilhado (igual ao Redis).`);
       } else rep.notes.push(`${name}: session.save_handler = ${h} n\xE3o \xE9 simulado.`);
     }
+    const my = Object.fromEntries(Object.entries(flat).map(([k, v]) => [k.replace(/-/g, "_"), v]));
+    const mysql = (src) => {
+      if (rep.changes.db !== "mysql") setCfg("db", "mysql", src, rep);
+    };
+    if (my.max_connections !== void 0 && !isNaN(+my.max_connections)) {
+      found++;
+      mysql(`${name}: max_connections`);
+      setCfg("dbMaxConn", +my.max_connections, `${name}: max_connections`, rep);
+    }
+    if (my.innodb_lock_wait_timeout !== void 0 && !isNaN(+my.innodb_lock_wait_timeout)) {
+      found++;
+      mysql(`${name}: innodb_lock_wait_timeout`);
+      setCfg("lockWait", +my.innodb_lock_wait_timeout, `${name}: innodb_lock_wait_timeout`, rep);
+    }
     const ap = parseApache(text, rep.mpmHint);
     if (ap) {
       found++;
@@ -633,11 +851,11 @@
       if (total !== null) setCfg("T", total, `${name}: ${ap.maxW !== null ? "MaxRequestWorkers" : "ServerLimit \xD7 ThreadsPerChild"}`, rep);
       else rep.notes.push(`${name}: sem MaxRequestWorkers; mantive o valor atual de threads/processos.`);
     }
-    const ignored = NOT_SIMULATED.filter((k) => k in flat || k in pk);
+    const ignored = NOT_SIMULATED.filter((k) => k in flat || k in pk || k in my);
     ignored.forEach((k) => {
       if (!rep.skipped.includes(k)) rep.skipped.push(k);
     });
-    if (!found) rep.notes.push(`${name}: n\xE3o encontrei nenhuma chave reconhecida (pm.*, opcache.enable, session.save_handler, MaxRequestWorkers\u2026).`);
+    if (!found) rep.notes.push(`${name}: n\xE3o encontrei nenhuma chave reconhecida (pm.*, opcache.enable, session.save_handler, MaxRequestWorkers, max_connections\u2026).`);
   }
   var stripHashComments = (t) => t.split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).join("\n");
   function readConfigFiles(files) {
@@ -657,10 +875,27 @@
   var STEP = 205;
   var CLX = 55;
   var LBX = 170;
-  var RX = 860;
   var H = 40 + 3 * STEP + 5;
   var QCAP_A = 34;
   var QCAP_F = 44;
+  var BX = PX + PW + (W - PX - PW - 140) / 2;
+  var BW = 140;
+  var BCX = BX + BW / 2;
+  var IX = BX + 12;
+  var IW = BW - 24;
+  var GAP = 16;
+  var RH = 118;
+  var OFF_H = 62;
+  var CORE = 14;
+  var QCAP_DB = 30;
+  var QCAP_LOCK = 10;
+  function side(cfg2) {
+    const qy = 106 + Math.ceil(cfg2.dbCores / 8) * CORE + 22, ly = qy + 62;
+    const rh = cfg2.session === "redis" ? RH : OFF_H, mh = cfg2.db === "mysql" ? ly + 30 : OFF_H, ry = (H - rh - GAP - mh) / 2;
+    return { ry, rh, my: ry + rh + GAP, mh, qy, ly };
+  }
+  var center = (n, step) => IX + (IW - Math.min(n, IW / step | 0) * step) / 2;
+  var coreXY = (i, cfg2, my) => ({ x: center(cfg2.dbCores, CORE) + i % 8 * CORE + 6, y: my + 106 + Math.floor(i / 8) * CORE + 6 });
   var userY = (id) => 40 + id * (H - 80) / 5;
   var gl = (n) => n <= 24 ? { big: true, w: 18, step: 24, per: 8, groups: n, k: 1 } : { big: false, w: 8, step: 10, per: 24, groups: Math.min(n, 144), k: Math.ceil(n / 144) };
   var cell = (x0, y0, i, n) => {
@@ -700,6 +935,16 @@
           if (cfg2.arch === "A" && r.slot >= 0) return cell(PX + 12, py + 44, r.slot, cfg2.T);
           if (cfg2.arch === "B" && r.worker) return cell(PX + 312, py + 44, widx.get(r.worker) || 0, b.workers.length);
           return { x: LBX + v.jx, y: H / 2 + 38 + v.jy };
+        case "db":
+          return coreXY(qi.get(r) || 0, cfg2, side(cfg2).my);
+        case "dbq": {
+          const i = Math.min(qi.get(r) || 0, QCAP_DB - 1), L = side(cfg2);
+          return { x: center(10, 11) + i % 10 * 11 + 5, y: L.my + L.qy + 18 + Math.floor(i / 10) * 12 };
+        }
+        case "dblock": {
+          const i = Math.min(qi.get(r) || 0, QCAP_LOCK - 1), L = side(cfg2);
+          return { x: center(10, 11) + i * 11 + 5, y: L.my + L.ly + 16 };
+        }
         case "back":
           return { x: CLX + v.jx / 2, y: userY(r.u.id) + v.jy / 2 };
         default:
@@ -712,6 +957,10 @@
         b.fpmQ.forEach((r, i) => qi.set(r, i));
         b.workers.forEach((w, i) => widx.set(w, i));
       }
+      const db = sim2.db;
+      db.active.forEach((r, i) => qi.set(r, i));
+      db.queue.forEach((r, i) => qi.set(r, i));
+      db.lockQ.forEach((r, i) => qi.set(r, i));
       const a = 1 - Math.exp(-real / 90);
       for (const r of sim2.reqs) {
         const v = V(r), t = target(r, v);
@@ -838,19 +1087,45 @@
           txt(`fila do FPM (listen queue): ${b.fpmQ.length}`, PX + 312, py + PH - 36, b.fpmQ.length ? orange : muted);
         } else txt("o PHP roda dentro de cada processo", PX + 312, py + 70, muted);
       });
-      const ry = H / 2 - 50, usingRedis = cfg2.session === "redis";
+      const { ry, rh, my, mh, qy, ly } = side(cfg2), usingRedis = cfg2.session === "redis";
       g.globalAlpha = usingRedis ? 1 : 0.35;
-      rr_(RX - 20, ry, 130, 100, soft, redis.up ? line : red, redis.up ? [] : [6, 4]);
-      txt("Redis", RX + 45, ry + 18, fg, "center", "bold 13px system-ui");
-      txt(redis.up ? "no ar" : "FORA DO AR", RX + 45, ry + 40, redis.up ? muted : red, "center");
-      txt("acessos: " + redis.ops, RX + 45, ry + 62, muted, "center");
-      txt(usingRedis ? "sess\xF5es:" : "(n\xE3o usado)", RX + 45, ry + 80, muted, "center");
-      if (usingRedis) users.filter((u) => u.where === "redis").forEach((u, k2, a) => {
-        g.beginPath();
-        g.arc(RX + 45 + (k2 - (a.length - 1) / 2) * 15, ry + 92, 5, 0, 7);
-        g.fillStyle = COLORS[u.id];
-        g.fill();
-      });
+      rr_(BX, ry, BW, rh, soft, redis.up ? line : red, redis.up ? [] : [6, 4]);
+      txt("Redis", BCX, ry + 20, fg, "center", "bold 13px system-ui");
+      if (!usingRedis) txt("(n\xE3o usado)", BCX, ry + 42, muted, "center");
+      else {
+        txt(redis.up ? "no ar" : "FORA DO AR", BCX, ry + 40, redis.up ? muted : red, "center");
+        txt("acessos: " + redis.ops, BCX, ry + 60, muted, "center");
+        txt("sess\xF5es:", BCX, ry + 80, muted, "center");
+        users.filter((u) => u.where === "redis").forEach((u, k2, a) => {
+          g.beginPath();
+          g.arc(BCX + (k2 - (a.length - 1) / 2) * 15, ry + 100, 5, 0, 7);
+          g.fillStyle = COLORS[u.id];
+          g.fill();
+        });
+      }
+      g.globalAlpha = 1;
+      const db = sim2.db, usingDb = cfg2.db === "mysql";
+      g.globalAlpha = usingDb ? 1 : 0.35;
+      rr_(BX, my, BW, mh, soft, db.up ? line : red, db.up ? [] : [6, 4]);
+      txt("MySQL", BCX, my + 20, fg, "center", "bold 13px system-ui");
+      if (!usingDb) txt("(n\xE3o usado)", BCX, my + 42, muted, "center");
+      else {
+        txt(db.up ? "no ar" : "FORA DO AR", BCX, my + 40, db.up ? muted : red, "center");
+        const full = db.conns >= cfg2.dbMaxConn;
+        txt(`conex\xF5es ${db.conns}/${cfg2.dbMaxConn}`, BCX, my + 62, full ? red : muted, "center");
+        g.fillStyle = line;
+        g.fillRect(IX, my + 72, IW, 6);
+        g.fillStyle = full ? red : blue;
+        g.fillRect(IX, my + 72, IW * Math.min(1, db.conns / cfg2.dbMaxConn), 6);
+        txt(`executando ${db.active.length}/${cfg2.dbCores}`, BCX, my + 96, muted, "center");
+        for (let i = 0; i < cfg2.dbCores; i++) {
+          const c = coreXY(i, cfg2, my);
+          g.fillStyle = i < db.active.length ? orange : line;
+          g.fillRect(c.x - 6, c.y - 6, 12, 12);
+        }
+        txt(`fila no banco: ${db.queue.length}`, BCX, my + qy, db.queue.length ? orange : muted, "center");
+        txt(db.locked ? `linha travada: ${db.lockQ.length}` : "sem lock", BCX, my + ly, db.locked ? red : muted, "center", db.locked ? "bold 12px system-ui" : "12px system-ui");
+      }
       g.globalAlpha = 1;
       lines = lines.filter((l) => l.life > 0);
       lines.forEach((l) => {
@@ -860,18 +1135,28 @@
         g.lineWidth = 2;
         g.beginPath();
         g.moveTo(v.x, v.y);
-        g.lineTo(RX - 20, ry + 50);
+        g.lineTo(BX, ry + rh / 2);
         g.stroke();
         g.globalAlpha = 1;
         g.lineWidth = 1;
       });
       reqs.forEach((r) => {
         if (r.stage === "apacheq" && (qi.get(r) || 0) >= QCAP_A || r.stage === "fpmq" && (qi.get(r) || 0) >= QCAP_F) return;
+        if (r.stage === "dbq" && (qi.get(r) || 0) >= QCAP_DB || r.stage === "dblock" && (qi.get(r) || 0) >= QCAP_LOCK) return;
         if (r.stage === "exec" && !gl(cfg2.arch === "A" ? cfg2.T : backends[r.b] ? backends[r.b].workers.length : 0).big) return;
         const v = V(r), color = COLORS[r.u.id];
         g.beginPath();
-        g.arc(v.x, v.y, 6, 0, 7);
-        if (r.noSess && r.stage !== "err") {
+        g.arc(v.x, v.y, r.stage === "db" ? 5 : 6, 0, 7);
+        if (r.ghost) {
+          g.fillStyle = muted;
+          g.globalAlpha = 0.55;
+          g.fill();
+          g.globalAlpha = 1;
+          g.setLineDash([2, 2]);
+          g.strokeStyle = fg;
+          g.stroke();
+          g.setLineDash([]);
+        } else if (r.noSess && r.stage !== "err") {
           g.strokeStyle = color;
           g.lineWidth = 2.5;
           g.stroke();
@@ -896,7 +1181,7 @@
 
   // src/model/presets.js
   var CATS = ["Mais comuns", "Comuns", "Did\xE1ticos"];
-  var PRESET_BASE = { lb: "rr", redisMs: 5, slowMs: 3e3, minSpare: 1, maxSpare: 3, timeout: 30, detect: 4, start: 2, idleTimeout: 6 };
+  var PRESET_BASE = { lb: "rr", redisMs: 5, slowMs: 3e3, minSpare: 1, maxSpare: 3, timeout: 30, detect: 4, start: 2, idleTimeout: 6, db: "none", dbQ: 5, dbMs: 10, dbCores: 4, dbMaxConn: 151, dbPersist: "off", lockWait: 50 };
   var PRESETS = [
     // ---- Mais comuns ----
     {
@@ -909,7 +1194,7 @@
       cat: "Mais comuns",
       name: "Depend\xEAncia lenta",
       cfg: { arch: "B", nb: 1, lb: "rr", T: 20, W: 8, pm: "static", exec: 200, session: "none", slowPct: 0, rate: 20, opcache: "on" },
-      text: "Tudo saud\xE1vel: 20 req/s \xD7 0,2 s = 4 workers ocupados, de 8. Clique em <b>Banco ficou lento</b>: o PHP passa a levar 2 s (consulta lenta, API externa fora do ar). O mesmo tr\xE1fego agora exigiria 40 workers, o pool satura e a fila cresce. Com o tempo v\xEAm os <b>504</b> e, quando a fila de conex\xF5es do Apache enche, tamb\xE9m os <b>503</b>; a vaz\xE3o de sucesso despenca: as requisi\xE7\xF5es esperam tanto que expiram antes de terminar. O c\xF3digo PHP n\xE3o mudou; s\xF3 a depend\xEAncia ficou lenta. Clique em <b>Banco voltou ao normal</b> e veja a recupera\xE7\xE3o.",
+      text: "Tudo saud\xE1vel: 20 req/s \xD7 0,2 s = 4 workers ocupados, de 8. Clique em <b>Banco ficou lento</b>: o PHP passa a levar 2 s (consulta lenta, API externa fora do ar). O mesmo tr\xE1fego agora exigiria 40 workers, o pool satura e a fila cresce. Com o tempo v\xEAm os <b>504</b> e, quando a fila de conex\xF5es do Apache enche, tamb\xE9m os <b>503</b>; a vaz\xE3o de sucesso despenca: as requisi\xE7\xF5es esperam tanto que expiram antes de terminar. O c\xF3digo PHP n\xE3o mudou; s\xF3 a depend\xEAncia ficou lenta. Clique em <b>Banco voltou ao normal</b> e veja a recupera\xE7\xE3o. Aqui o banco est\xE1 embutido na dura\xE7\xE3o do PHP; os cen\xE1rios de <b>MySQL</b> (abaixo) mostram o banco separado, com conex\xF5es, fila e erros pr\xF3prios.",
       actions: [{ label: "Banco ficou lento (PHP: 0,2 s \u2192 2 s)", set: { exec: 2e3 } }, { label: "Banco voltou ao normal", set: { exec: 200 } }]
     },
     {
@@ -923,6 +1208,20 @@
       name: "Backend cai (failover)",
       cfg: { arch: "B", nb: 3, lb: "rr", T: 8, W: 4, pm: "static", exec: 300, session: "none", slowPct: 0, rate: 6, opcache: "on", detect: 4 },
       text: "3 servidores de aplica\xE7\xE3o em rod\xEDzio. Clique em <b>Derrubar app2</b>: enquanto o balanceador n\xE3o percebe (padr\xE3o 4 s), cerca de 1 em cada 3 novas requisi\xE7\xF5es vai ao servidor ca\xEDdo e d\xE1 <b>502</b>; depois ele sai do rod\xEDzio e os erros param. Clique em <b>Subir app2</b> para ver a volta. Repita com <i>Tempo at\xE9 o balanceador notar</i> = 0 e compare. Este balanceador n\xE3o tenta de novo. No nginx (<code>proxy_next_upstream</code>, ativo por padr\xE3o) uma conex\xE3o recusada \xE9 refeita em outro servidor e o cliente quase n\xE3o v\xEA erro; no HAProxy as novas tentativas (<code>retries</code>) v\xE3o ao mesmo servidor, a menos que <code>option redispatch</code> esteja ligado. Os erros que sobram v\xEAm das requisi\xE7\xF5es que estavam em andamento no servidor que caiu."
+    },
+    {
+      cat: "Mais comuns",
+      name: "Too many connections",
+      cfg: { arch: "B", nb: 3, lb: "rr", T: 100, W: 100, pm: "static", exec: 50, session: "none", slowPct: 0, rate: 150, opcache: "on", db: "mysql", dbQ: 5, dbMs: 4, dbCores: 8, dbMaxConn: 151 },
+      text: "3 backends com <i>max_children</i> = 100 cada: at\xE9 <b>300</b> scripts podem querer uma conex\xE3o ao mesmo tempo, mas o MySQL aceita <b>151</b> (<code>max_connections</code> padr\xE3o). Com as consultas r\xE1pidas, bastam umas 10 conex\xF5es e ningu\xE9m nota. Clique em <b>Consulta ficou lenta</b> (4 ms \u2192 40 ms): cada script segura a conex\xE3o por mais tempo, as conex\xF5es se acumulam at\xE9 151 e as seguintes s\xE3o recusadas com <b>ERROR 1040 Too many connections</b>. O PDO lan\xE7a exce\xE7\xE3o e a resposta \xE9 <b>500</b>. Regra pr\xE1tica: a soma de <i>max_children</i> de todos os backends (mais crons e outras aplica\xE7\xF5es) n\xE3o deve passar de <code>max_connections</code>. Mesmo assim, o banco continua lento: subir o limite troca os 500 por fila e 504. Clique em <b>Consulta voltou ao normal</b>.",
+      actions: [{ label: "Consulta ficou lenta (4 ms \u2192 40 ms)", set: { dbMs: 40 } }, { label: "Consulta voltou ao normal", set: { dbMs: 4 } }]
+    },
+    {
+      cat: "Mais comuns",
+      name: "Consulta sem \xEDndice",
+      cfg: { arch: "B", nb: 1, lb: "rr", T: 50, W: 20, pm: "static", exec: 100, session: "none", slowPct: 0, rate: 20, opcache: "on", db: "mysql", dbQ: 3, dbMs: 2, dbCores: 4 },
+      text: "Cada requisi\xE7\xE3o faz 3 consultas de 2 ms, com \xEDndice. Clique em <b>Remover o \xEDndice</b> (ou: a tabela cresceu e a consulta nunca teve \xEDndice): sem \xEDndice o MySQL l\xEA a tabela inteira e cada consulta passa a levar 150 ms. Os 4 n\xFAcleos do banco ficam ocupados, forma-se uma <b>fila dentro do MySQL</b>, os workers do FPM ficam todos presos esperando o banco e a fila do FPM cresce at\xE9 os <b>504</b>. As bolinhas cinzas s\xE3o requisi\xE7\xF5es cujo cliente j\xE1 recebeu 504, mas o PHP continua esperando a consulta. Aumentar <i>max_children</i> n\xE3o ajuda: o gargalo est\xE1 no banco. No real, o <i>slow query log</i> e o <code>EXPLAIN</code> mostram o problema. Clique em <b>Recriar o \xEDndice</b>.",
+      actions: [{ label: "Remover o \xEDndice (2 ms \u2192 150 ms)", set: { dbMs: 150 } }, { label: "Recriar o \xEDndice", set: { dbMs: 2 } }]
     },
     // ---- Comuns ----
     {
@@ -961,6 +1260,26 @@
       cfg: { arch: "B", nb: 1, lb: "rr", T: 20, W: 10, pm: "dynamic", exec: 800, session: "none", slowPct: 0, rate: 0, opcache: "on", minSpare: 1, maxSpare: 3 },
       text: "O pool come\xE7a com 2 workers (<i>start_servers</i>). Clique em <b>Rajada de 20 requisi\xE7\xF5es</b>: a cada segundo o master cria no m\xE1ximo <code>min(taxa, min_spare \u2212 ociosos)</code> workers (a taxa dobra: 1, 2, 4\u2026, mas \xE9 limitada pelo d\xE9ficit). Com <i>min_spare</i> = 1 nasce <b>1 worker por segundo</b>; aumente <i>min_spare</i> e repita a rajada para ver o pool crescer mais r\xE1pido. Compare com <i>pm = static</i> (todos prontos) e <i>ondemand</i> (come\xE7a com zero)."
     },
+    {
+      cat: "Comuns",
+      name: "Conex\xF5es persistentes",
+      cfg: { arch: "B", nb: 3, lb: "rr", T: 64, W: 64, pm: "static", exec: 400, session: "none", slowPct: 0, rate: 20, opcache: "on", db: "mysql", dbQ: 2, dbMs: 5, dbCores: 8, dbMaxConn: 151, dbPersist: "on" },
+      text: "Conex\xF5es <b>persistentes</b> (<code>PDO::ATTR_PERSISTENT</code>): o worker n\xE3o fecha a conex\xE3o no fim do script. S\xE3o 3 \xD7 64 = <b>192</b> workers para <code>max_connections</code> = 151. Com tr\xE1fego normal, poucos workers trabalham e poucas conex\xF5es existem. Clique em <b>Pico de tr\xE1fego</b>: quase todos os workers s\xE3o usados e cada um abre a sua conex\xE3o, que n\xE3o \xE9 mais fechada; elas sobem para perto de 151. Clique em <b>Tr\xE1fego normal</b>: as conex\xF5es <b>continuam abertas</b>, ociosas, presas aos workers, e sobra pouca folga para um cron ou outra aplica\xE7\xE3o. Um pico um pouco maior (<i>Requisi\xE7\xF5es por segundo</i> = 300) j\xE1 faz os workers sem conex\xE3o receberem <b>1040 Too many connections</b> (500). Repita com <i>Conex\xF5es persistentes = n\xE3o</i>: depois do pico, as conex\xF5es caem para as requisi\xE7\xF5es em andamento. O manual do PHP avisa: o limite do banco deve ser maior que o n\xFAmero de workers.",
+      actions: [{ label: "Pico de tr\xE1fego (250 req/s)", set: { rate: 250 } }, { label: "Tr\xE1fego normal (20 req/s)", set: { rate: 20 } }]
+    },
+    {
+      cat: "Comuns",
+      name: "MySQL fora do ar",
+      cfg: { arch: "B", nb: 2, lb: "rr", T: 20, W: 8, pm: "static", exec: 100, session: "none", slowPct: 0, rate: 10, opcache: "on", db: "mysql", dbQ: 3, dbMs: 5, dbCores: 4 },
+      text: "Clique em <b>Derrubar MySQL</b>: quem estava no meio de uma consulta perde a conex\xE3o (<b>2013</b>) e as novas requisi\xE7\xF5es n\xE3o conseguem conectar (<b>2002</b>, conex\xE3o recusada). Desde o PHP 8.0 o PDO lan\xE7a exce\xE7\xE3o por padr\xE3o (o mysqli, desde o 8.1); sem tratamento, vira erro fatal e o PHP responde <b>500</b>. A falha \xE9 <b>r\xE1pida</b>: os workers n\xE3o ficam presos e n\xE3o h\xE1 fila. Compare com <i>Sess\xE3o no Redis</i>, em que o Redis fora d\xE1 200 sem sess\xE3o. No real, se o servidor do banco some da rede (sem recusar a conex\xE3o), o PHP espera o tempo de conex\xE3o esgotar, e a\xED os workers ficam presos (n\xE3o simulado)."
+    },
+    {
+      cat: "Comuns",
+      name: "N+1 consultas",
+      cfg: { arch: "B", nb: 1, lb: "rr", T: 30, W: 16, pm: "static", exec: 100, session: "none", slowPct: 0, rate: 10, opcache: "on", db: "mysql", dbQ: 2, dbMs: 3, dbCores: 8 },
+      text: "Uma p\xE1gina de lista com 2 consultas. Clique em <b>ORM sem eager loading</b>: o c\xF3digo passa a fazer 1 consulta para a lista e mais 1 para cada um dos ~100 itens (o problema <b>N+1</b>). Cada consulta \xE9 r\xE1pida (3 ms), mas s\xE3o 100: a lat\xEAncia sobe cerca de <b>0,3 s</b> e o banco fica 50 vezes mais ocupado com o mesmo tr\xE1fego. Clique em <b>Eager loading</b> (uma consulta com <code>JOIN</code>/<code>IN</code>) e a lat\xEAncia volta. No real cada consulta tamb\xE9m paga a ida e volta na rede.",
+      actions: [{ label: "ORM sem eager loading (2 \u2192 100 consultas)", set: { dbQ: 100 } }, { label: "Eager loading (2 consultas)", set: { dbQ: 2 } }]
+    },
     // ---- Didáticos ----
     {
       cat: "Did\xE1ticos",
@@ -985,11 +1304,26 @@
       name: "Escala: 512 workers",
       cfg: { arch: "B", nb: 1, lb: "rr", T: 600, W: 512, pm: "static", exec: 800, session: "none", slowPct: 0, rate: 500, opcache: "on" },
       text: "500 req/s \xD7 0,8 s = 400 workers ocupados, de 512. Com tanta coisa, cada quadrado representa v\xE1rios workers (a cor mostra a fra\xE7\xE3o ocupada). Suba a carga para 750 req/s: passa da capacidade (640 req/s), a fila enche e come\xE7am os <b>503</b> (fila de conex\xF5es cheia; no Linux real o cliente veria retransmiss\xF5es e timeouts, n\xE3o um 503)."
+    },
+    {
+      cat: "Did\xE1ticos",
+      name: "Lock: 504 antes do erro do banco",
+      cfg: { arch: "B", nb: 1, lb: "rr", T: 30, W: 12, pm: "static", exec: 100, session: "none", slowPct: 0, rate: 2, opcache: "on", timeout: 30, db: "mysql", dbQ: 2, dbMs: 5, dbCores: 4, lockWait: 50 },
+      text: "Toda requisi\xE7\xE3o atualiza a mesma linha (estoque, saldo, contador). Clique em <b>Travar a linha</b>: uma transa\xE7\xE3o longa (ou um <code>SELECT ... FOR UPDATE</code> esquecido) segura o lock. As escritas esperam por at\xE9 <code>innodb_lock_wait_timeout</code> = <b>50 s</b>; leituras simples n\xE3o esperariam. Os 12 workers enchem em segundos e o resto enfileira. Aos <b>30 s</b> (timeout do servidor web) o cliente recebe <b>504</b>, mas o PHP <b>continua esperando</b> o banco (bolinhas cinzas): <code>max_execution_time</code> n\xE3o conta espera de I/O e o worker s\xF3 \xE9 liberado aos 50 s, com <b>ERROR 1205</b> (que vai para o log do PHP; o cliente j\xE1 foi embora). Agora clique em <b>innodb_lock_wait_timeout = 5 s</b>: vale para as pr\xF3ximas esperas; o erro passa a vir antes do timeout web, vira <b>500</b> r\xE1pido e os workers giram. Clique em <b>Destravar</b> para encerrar a transa\xE7\xE3o. Isto \xE9 lock de <b>linha</b> (InnoDB); um <code>ALTER TABLE</code> esperando metadata lock usa <code>lock_wait_timeout</code>, que por padr\xE3o \xE9 de 1 ano.",
+      actions: [{ label: "Travar a linha", lock: true }, { label: "innodb_lock_wait_timeout = 5 s", set: { lockWait: 5 } }, { label: "Destravar", lock: false }]
+    },
+    {
+      cat: "Did\xE1ticos",
+      name: "Gargalo no MySQL: mais workers n\xE3o ajudam",
+      cfg: { arch: "B", nb: 1, lb: "rr", T: 100, W: 20, pm: "static", exec: 100, session: "none", slowPct: 0, rate: 50, opcache: "on", db: "mysql", dbQ: 4, dbMs: 25, dbCores: 4 },
+      text: "Cada requisi\xE7\xE3o ocupa um n\xFAcleo do MySQL por 4 \xD7 25 ms = 0,1 s. Com 4 n\xFAcleos, o banco atende no m\xE1ximo 4 / 0,1 = <b>40 req/s</b>, e chegam 50. A fila se forma <b>dentro do MySQL</b> e os workers ficam esperando. Clique em <b>max_children = 80</b>: a vaz\xE3o continua em ~40 req/s; s\xF3 aumentam a fila no banco e o n\xFAmero de conex\xF5es. Quando o limite est\xE1 no banco, a sa\xEDda \xE9 consultas mais baratas (\xEDndice, cache, menos consultas) ou mais capacidade no banco (aqui: mais n\xFAcleos).",
+      actions: [{ label: "max_children = 80", set: { W: 80 } }, { label: "MySQL com 8 n\xFAcleos", set: { dbCores: 8 } }]
     }
   ];
 
   // src/ui/panels.js
   var $ = (id) => document.getElementById(id);
+  var DB_ERR = { "1040": "Too many connections", "2002": "conex\xE3o recusada", "1205": "lock wait timeout", "2013": "conex\xE3o perdida na consulta" };
   function createPanels(sim2) {
     const cfg2 = sim2.cfg;
     function updateEnabled() {
@@ -1028,9 +1362,18 @@
       const f = (ms) => ms >= 1e3 ? (ms / 1e3).toFixed(2) + " s" : Math.round(ms) + " ms";
       const items = [["em andamento", reqs.length], ["conclu\xEDdas", stats.done], ["erros", stats.errors], ["vaz\xE3o (req/s, \xFAltimos 5 s)", (stats.times.length / 5).toFixed(1)], ["lat\xEAncia m\xE9dia", l.length ? f(avg) : "-"], ["lat\xEAncia p95", l.length ? f(p95) : "-"], ["sess\xF5es perdidas", stats.lost]];
       if (stats.noSess) items.push(["respostas 200 sem sess\xE3o", stats.noSess]);
-      const meaning = { "502": "backend indispon\xEDvel", "502/503": "sem backend", "503": "fila de conex\xF5es cheia", "504": "tempo esgotado" };
+      const db = sim2.db, ghosts = reqs.filter((r) => r.ghost).length;
+      if (cfg2.db === "mysql") {
+        items.push(["conex\xF5es MySQL", `${db.conns}/${cfg2.dbMaxConn}`], ["pico de conex\xF5es", db.maxUsed], ["fila no MySQL", db.queue.length]);
+        if (db.lockQ.length) items.push(["esperando lock de linha", db.lockQ.length]);
+        if (ghosts) items.push(["PHP ainda esperando o banco ap\xF3s o 504", ghosts]);
+      }
+      const meaning = { "500": "exce\xE7\xE3o do MySQL no PHP", "502": "backend indispon\xEDvel", "502/503": "sem backend", "503": "fila de conex\xF5es cheia", "504": "tempo esgotado" };
       Object.entries(stats.codes).sort().forEach(([c, n]) => items.push(["erro " + c + " \xB7 " + (meaning[c] || ""), n]));
-      $("stats").innerHTML = items.map(([a, b]) => `<div><span>${a}</span><b${a === "erros" && b || a.startsWith("erro ") ? ' style="color:var(--red)"' : ""}>${b}</b></div>`).join("");
+      Object.entries(stats.dbErr).forEach(([c, n]) => {
+        if (n) items.push([`MySQL ${c} \xB7 ${DB_ERR[c]}`, n]);
+      });
+      $("stats").innerHTML = items.map(([a, b]) => `<div><span>${a}</span><b${a === "erros" && b || a.startsWith("erro ") || a.startsWith("MySQL ") ? ' style="color:var(--red)"' : ""}>${b}</b></div>`).join("");
       $("sesscard").hidden = cfg2.session === "none";
       const app = (i) => "app" + (i + 1), ago = (t) => {
         const s = Math.floor((T - t) / 1e3);
@@ -1046,6 +1389,11 @@
       $("sess").innerHTML = users.map((u) => `<tr${u.last && (u.last.kind !== "ok" && u.last.kind !== "new") && T - u.last.t < 1500 ? ' class="flash"' : ""}><td><span class="dot" style="background:${COLORS[u.id]}"></span>U${u.id + 1}</td><td>${u.hits}</td><td>${where(u)}</td><td>${last(u.last)}</td><td>${u.lostN ? `<span class="bad">${u.lostN}</span>` : 0}</td></tr>`).join("");
       $("redisBtn").textContent = redis.up ? "Derrubar Redis" : "Subir Redis";
       $("redisBtn").className = redis.up ? "st-up" : "st-down";
+      $("dbBtn").hidden = $("lockBtn").hidden = cfg2.db !== "mysql";
+      $("dbBtn").textContent = db.up ? "Derrubar MySQL" : "Subir MySQL";
+      $("dbBtn").className = db.up ? "st-up" : "st-down";
+      $("lockBtn").textContent = db.locked ? "Destravar a linha" : "Travar uma linha (transa\xE7\xE3o longa)";
+      $("lockBtn").className = db.locked ? "st-down" : "";
     }
     function buildPresets() {
       $("presets").innerHTML = CATS.map((c) => `<div class="pcat"><div class="pcat-t">${c}</div><div class="chips">${PRESETS.map((p, i) => p.cat === c ? `<button class="chip" data-i="${i}">${p.name}</button>` : "").join("")}</div></div>`).join("");
@@ -1053,11 +1401,16 @@
         const p = PRESETS[+el.dataset.i];
         Object.assign(cfg2, PRESET_BASE, p.cfg);
         sim2.setRedis(true);
+        sim2.setDb(true);
+        sim2.setDbLock(false);
         document.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", c === el));
         $("desc").innerHTML = p.text + (p.actions ? '<div class="chips" style="margin-top:10px">' + p.actions.map((a, k) => `<button data-a="${k}">${a.label}</button>`).join("") + "</div>" : "");
         if (p.actions) $("desc").querySelectorAll("button").forEach((b) => b.onclick = () => {
-          Object.assign(cfg2, p.actions[+b.dataset.a].set);
+          const a = p.actions[+b.dataset.a];
+          if (a.set) Object.assign(cfg2, a.set);
+          if ("lock" in a) sim2.setDbLock(a.lock);
           buildParams();
+          if (a.set && Object.keys(a.set).some((k) => (PARAMS.find((x) => x.k === k) || {}).struct)) sim2.reset();
         });
         buildParams();
         sim2.reset();
@@ -1126,6 +1479,8 @@
   };
   $2("reset").onclick = () => sim.reset();
   $2("redisBtn").onclick = () => sim.setRedis(!sim.redis.up);
+  $2("dbBtn").onclick = () => sim.setDb(!sim.db.up);
+  $2("lockBtn").onclick = () => sim.setDbLock(!sim.db.locked);
   $2("cfgfile").onchange = async (e) => {
     const files = [];
     for (const f of e.target.files) files.push([f.name, await f.text()]);

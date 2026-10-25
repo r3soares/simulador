@@ -1,8 +1,8 @@
 {
   "name": "simulador-php",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Simulador didático de uma pilha web PHP (balanceador, Apache, PHP-FPM, Redis)",
+  "description": "Simulador didático de uma pilha web PHP (balanceador, Apache, PHP-FPM, Redis, MySQL)",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",

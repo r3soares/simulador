@@ -21,7 +21,7 @@ const stat = async (page, label) => {
 };
 
 test('carrega com o estado inicial e a simulação anda', async ({ page }) => {
-  await expect(page.locator('#presets button')).toHaveCount(14);
+  await expect(page.locator('#presets button')).toHaveCount(21);
   await expect(page.locator('#killers button')).toHaveText(['Derrubar app1']);
   await page.waitForTimeout(3000);
   expect(Number(await stat(page, 'concluídas'))).toBeGreaterThan(0);
@@ -55,7 +55,18 @@ test('derrubar e subir backend e Redis atualizam botões e erros', async ({ page
   await expect(page.locator('#redisBtn')).toHaveText('Subir Redis');
 });
 
+test('padrão: sessão no Redis e MySQL ligados', async ({ page }) => {
+  await expect(page.locator('select[data-k=session]')).toHaveValue('redis');
+  await expect(page.locator('select[data-k=db]')).toHaveValue('mysql');
+  await expect(page.locator('#sesscard')).toBeVisible();
+  await expect(page.locator('#dbBtn')).toBeVisible();
+  await expect(page.locator('#stats')).toContainText('conexões MySQL');
+  await page.waitForTimeout(3000);
+  expect(await stat(page, 'erros')).toBe('0');
+});
+
 test('tabela de sessões só aparece com sessão', async ({ page }) => {
+  await page.locator('#presets button', { hasText:'Pool saturado' }).click();
   await expect(page.locator('#sesscard')).toBeHidden();
   await page.locator('#presets button', { hasText:'Sessões em 3 backends' }).click();
   await expect(page.locator('#sesscard')).toBeVisible();
@@ -71,6 +82,36 @@ test('Redis fora: respostas 200 sem sessão, sem erros', async ({ page }) => {
   await expect(page.locator('#stats')).toContainText('respostas 200 sem sessão', { timeout:6000 });
   expect(await stat(page, 'erros')).toBe('0');
   await expect(page.locator('#sess')).toContainText('sessão não lida');
+});
+
+test('MySQL: botões só com banco; queda dá 500 (2002) e o estado mostra as conexões', async ({ page }) => {
+  await page.locator('#presets button', { hasText:'Pool saturado' }).click();
+  await expect(page.locator('#dbBtn')).toBeHidden();
+  await expect(page.locator('[data-k=dbMaxConn]')).toBeDisabled();
+  await page.locator('#presets button', { hasText:'MySQL fora do ar' }).click();
+  await expect(page.locator('#dbBtn')).toBeVisible();
+  await expect(page.locator('[data-k=dbMaxConn]')).toBeEnabled();
+  await expect(page.locator('#stats')).toContainText('conexões MySQL');
+  await page.click('#dbBtn');
+  await expect(page.locator('#dbBtn')).toHaveText('Subir MySQL');
+  await expect(page.locator('#stats')).toContainText('MySQL 2002', { timeout:6000 });
+  await expect(page.locator('#stats')).toContainText('erro 500');
+  // outro cenário religa o MySQL
+  await page.locator('#presets button', { hasText:'Lock: 504' }).click();
+  await expect(page.locator('#dbBtn')).toHaveText('Derrubar MySQL');
+  await page.locator('#desc button', { hasText:'Travar a linha' }).click();
+  await expect(page.locator('#lockBtn')).toHaveText('Destravar a linha');
+  await expect(page.locator('#stats')).toContainText('esperando lock de linha', { timeout:6000 });
+  await page.locator('#presets button', { hasText:'Pool saturado' }).click();
+  await expect(page.locator('#dbBtn')).toBeHidden();
+});
+
+test('ação que muda parâmetro estrutural reinicia a simulação', async ({ page }) => {
+  await page.locator('#presets button', { hasText:'Gargalo no MySQL' }).click();
+  await page.waitForTimeout(2000);
+  await page.locator('#desc button', { hasText:'max_children = 80' }).click();
+  await expect(page.locator('#v-W')).toHaveText('80');
+  await expect.poll(async () => Number(await stat(page, 'concluídas'))).toBeLessThan(20); // o painel atualiza a cada 250 ms
 });
 
 test('parâmetros se habilitam conforme a configuração', async ({ page }) => {
@@ -102,6 +143,13 @@ test('carregar configuração aplica valores e mostra o relatório', async ({ pa
   await expect(page.locator('#cfgreport')).toContainText('Reconhecido, mas não simulado');
   await expect(page.locator('select[data-k=pm]')).toHaveValue('ondemand');
   await expect(page.locator('#v-T')).toHaveText('100');
+});
+
+test('carregar my.cnf liga o MySQL com max_connections e innodb_lock_wait_timeout', async ({ page }) => {
+  await page.setInputFiles('#cfgfile', [FIXTURE('my.cnf')]);
+  await expect(page.locator('#cfgreport')).toContainText('max_connections = 300');
+  await expect(page.locator('select[data-k=db]')).toHaveValue('mysql');
+  await expect(page.locator('#v-lockWait')).toHaveText('10');
 });
 
 test('canvas usa devicePixelRatio no tamanho do buffer', async ({ browser }) => {

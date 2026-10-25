@@ -1,9 +1,10 @@
-// Painéis HTML: parâmetros, botões de derrubar backend, estado, tabela de sessões, cenários e relatório de configuração.
+// Painéis HTML: parâmetros, botões de derrubar backend, Redis e MySQL, estado, tabela de sessões, cenários e relatório de configuração.
 import { PARAMS, GROUPS, ENABLE, idxOf } from '../model/params.js';
 import { CATS, PRESETS, PRESET_BASE } from '../model/presets.js';
 import { COLORS } from './canvas.js';
 
 const $ = id => document.getElementById(id);
+export const DB_ERR = { '1040':'Too many connections', '2002':'conexão recusada', '1205':'lock wait timeout', '2013':'conexão perdida na consulta' };
 
 export function createPanels(sim) {
   const cfg = sim.cfg;
@@ -43,9 +44,16 @@ export function createPanels(sim) {
     const f = ms => ms >= 1000 ? (ms / 1000).toFixed(2) + ' s' : Math.round(ms) + ' ms';
     const items = [['em andamento', reqs.length], ['concluídas', stats.done], ['erros', stats.errors], ['vazão (req/s, últimos 5 s)', (stats.times.length / 5).toFixed(1)], ['latência média', l.length ? f(avg) : '-'], ['latência p95', l.length ? f(p95) : '-'], ['sessões perdidas', stats.lost]];
     if (stats.noSess) items.push(['respostas 200 sem sessão', stats.noSess]);
-    const meaning = { '502': 'backend indisponível', '502/503': 'sem backend', '503': 'fila de conexões cheia', '504': 'tempo esgotado' };
+    const db = sim.db, ghosts = reqs.filter(r => r.ghost).length;
+    if (cfg.db === 'mysql') {
+      items.push(['conexões MySQL', `${db.conns}/${cfg.dbMaxConn}`], ['pico de conexões', db.maxUsed], ['fila no MySQL', db.queue.length]);
+      if (db.lockQ.length) items.push(['esperando lock de linha', db.lockQ.length]);
+      if (ghosts) items.push(['PHP ainda esperando o banco após o 504', ghosts]);
+    }
+    const meaning = { '500': 'exceção do MySQL no PHP', '502': 'backend indisponível', '502/503': 'sem backend', '503': 'fila de conexões cheia', '504': 'tempo esgotado' };
     Object.entries(stats.codes).sort().forEach(([c, n]) => items.push(['erro ' + c + ' · ' + (meaning[c] || ''), n]));
-    $('stats').innerHTML = items.map(([a, b]) => `<div><span>${a}</span><b${(a === 'erros' && b) || a.startsWith('erro ') ? ' style="color:var(--red)"' : ''}>${b}</b></div>`).join('');
+    Object.entries(stats.dbErr).forEach(([c, n]) => { if (n) items.push([`MySQL ${c} · ${DB_ERR[c]}`, n]); });
+    $('stats').innerHTML = items.map(([a, b]) => `<div><span>${a}</span><b${(a === 'erros' && b) || a.startsWith('erro ') || a.startsWith('MySQL ') ? ' style="color:var(--red)"' : ''}>${b}</b></div>`).join('');
     $('sesscard').hidden = cfg.session === 'none'; // tabela só faz sentido com sessão
     const app = i => 'app' + (i + 1), ago = t => { const s = Math.floor((T - t) / 1000); return s < 1 ? 'agora' : `há ${s} s`; };
     const where = u => u.where === null ? '-' : u.where === 'redis' ? (redis.up ? 'Redis (compartilhado)' : '<span class="bad">Redis (fora do ar)</span>')
@@ -58,14 +66,23 @@ export function createPanels(sim) {
     $('sess').innerHTML = users.map(u => `<tr${u.last && (u.last.kind !== 'ok' && u.last.kind !== 'new') && T - u.last.t < 1500 ? ' class="flash"' : ''}><td><span class="dot" style="background:${COLORS[u.id]}"></span>U${u.id + 1}</td><td>${u.hits}</td><td>${where(u)}</td><td>${last(u.last)}</td><td>${u.lostN ? `<span class="bad">${u.lostN}</span>` : 0}</td></tr>`).join('');
     $('redisBtn').textContent = redis.up ? 'Derrubar Redis' : 'Subir Redis';
     $('redisBtn').className = redis.up ? 'st-up' : 'st-down';
+    $('dbBtn').hidden = $('lockBtn').hidden = cfg.db !== 'mysql';
+    $('dbBtn').textContent = db.up ? 'Derrubar MySQL' : 'Subir MySQL'; $('dbBtn').className = db.up ? 'st-up' : 'st-down';
+    $('lockBtn').textContent = db.locked ? 'Destravar a linha' : 'Travar uma linha (transação longa)'; $('lockBtn').className = db.locked ? 'st-down' : '';
   }
   function buildPresets() {
     $('presets').innerHTML = CATS.map(c => `<div class="pcat"><div class="pcat-t">${c}</div><div class="chips">${PRESETS.map((p, i) => p.cat === c ? `<button class="chip" data-i="${i}">${p.name}</button>` : '').join('')}</div></div>`).join('');
     $('presets').querySelectorAll('button').forEach(el => el.onclick = () => {
-      const p = PRESETS[+el.dataset.i]; Object.assign(cfg, PRESET_BASE, p.cfg); sim.setRedis(true);
+      const p = PRESETS[+el.dataset.i]; Object.assign(cfg, PRESET_BASE, p.cfg); sim.setRedis(true); sim.setDb(true); sim.setDbLock(false);
       document.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c === el));
       $('desc').innerHTML = p.text + (p.actions ? '<div class="chips" style="margin-top:10px">' + p.actions.map((a, k) => `<button data-a="${k}">${a.label}</button>`).join('') + '</div>' : '');
-      if (p.actions) $('desc').querySelectorAll('button').forEach(b => b.onclick = () => { Object.assign(cfg, p.actions[+b.dataset.a].set); buildParams(); });
+      // ação: muda parâmetros (set) e/ou trava a linha no MySQL (lock); parâmetro estrutural reinicia a simulação
+      if (p.actions) $('desc').querySelectorAll('button').forEach(b => b.onclick = () => {
+        const a = p.actions[+b.dataset.a];
+        if (a.set) Object.assign(cfg, a.set);
+        if ('lock' in a) sim.setDbLock(a.lock);
+        buildParams(); if (a.set && Object.keys(a.set).some(k => (PARAMS.find(x => x.k === k) || {}).struct)) sim.reset();
+      });
       buildParams(); sim.reset();
     });
   }

@@ -4,7 +4,7 @@ Como o motor (`src/engine/`) funciona. Simulação de eventos discretos com temp
 
 ```
 clientes (6 usuários) → balanceador → [backend 1..3] → (Redis para sessões)
-                                       Apache event → PHP-FPM   (arquitetura B)
+                                       Apache event → PHP-FPM   (arquitetura B)   → (MySQL compartilhado)
                                        Apache prefork + mod_php (arquitetura A)
 ```
 
@@ -19,8 +19,8 @@ Chegadas: processo de Poisson com média `rate` req/s (intervalos exponenciais).
 | chegada (B) | — | Se há thread livre (`thrBusy < T`), ocupa uma e entra na fila do FPM; senão entra na fila do Apache. Fila do Apache com 511 → **503**. |
 | chegada (A) | — | Se há processo livre, ocupa e executa; senão, fila do Apache (mesmo limite 511 → 503). |
 | `fpmq` (B) | espera | Um worker ocioso pega a primeira da fila. |
-| `exec` | `exec × U(0,85; 1,15)` + custos | PHP rodando. Custos: OPcache desligado +120 ms (ou +120 ms na 1ª requisição de cada backend, aquecimento); sessão em arquivo +2 ms; Redis `2 × redisMs`. |
-| fim do `exec` | — | Se passou de `timeout` desde a chegada ao backend → **504** (o worker já foi gasto). B: libera worker **e** thread. A: continua segurando o processo. |
+| `exec` | `exec × U(0,85; 1,15)` + custos | PHP rodando. Custos: OPcache desligado +120 ms (ou +120 ms na 1ª requisição de cada backend, aquecimento); sessão em arquivo +2 ms; Redis `2 × redisMs`. Com MySQL, antes disso abre a conexão (ver [MySQL](#mysql)). |
+| fim do `exec` | — | Se passou de `timeout` desde a chegada ao backend → **504** (o worker já foi gasto). Com MySQL, vai para o banco (`dbq`/`db`/`dblock`). Sem MySQL: B libera worker **e** thread; A continua segurando o processo. |
 | `send` | 20 ms, ou `slowMs` se cliente lento | Entrega ao cliente. A: segura o processo. B: não segura nada (suposição de buffering, ver abaixo). |
 | `back` | 250 ms | Volta ao cliente. Latência medida = tempo total desde a criação (inclui as viagens: 510 ms fixos). |
 
@@ -39,9 +39,34 @@ Avaliado a cada 1 s (como o heartbeat do FPM), seguindo `fpm_process_ctl.c` ([re
 - **arquivo:** a sessão fica no backend onde foi criada. Requisição em outro backend → sessão perdida (contador do usuário volta a 0, `perdas` +1).
 - **Redis:** um único Redis compartilhado, 2 acessos por requisição. **Redis fora:** como no PHP puro, `session_start()` falha só com avisos; a resposta é **200 sem sessão** (bolinha vazada), nada é gravado nem apagado, e a sessão volta quando o Redis volta ([referências §1 e §3](referencias.md#1-php-diretivas-ini-e-funções)). Frameworks costumam transformar isso em 500 ([§9](referencias.md#9-frameworks-o-que-acontece-quando-a-sessão-ou-o-redis-falha)).
 
+## MySQL
+
+Um único MySQL compartilhado por todos os backends (`cfg.db = 'mysql'`); com `db = 'none'` nada abaixo acontece e o motor é idêntico ao de antes ([referências §10](referencias.md#10-mysql-84)).
+
+**Conexão.** No início do `exec` o script conecta:
+
+- **não persistente:** a requisição abre uma conexão e a solta ao sair do banco (ou ao falhar);
+- **persistente:** a conexão pertence ao worker do FPM (B) ou ao processo do prefork (A); é aberta no primeiro uso e só cai quando o worker é removido (dynamic/ondemand), o backend cai ou o MySQL cai.
+
+MySQL fora → **500** com `2002`; `conexões ≥ max_connections` → **500** com `1040`. A falha é imediata: worker e thread são liberados. "pico de conexões" imita `Max_used_connections`.
+
+**Consultas.** Depois do `exec`, a requisição faz as `dbQ` consultas de uma vez, num núcleo do MySQL:
+
+| Estágio | Duração | O que acontece |
+|---|---|---|
+| `dblock` | até `lockWait` s | Só com a linha travada. Não ocupa núcleo. Se o tempo vence → **500** com `1205`. Ao destravar, segue para `db`/`dbq`. |
+| `dbq` | espera | Todos os núcleos ocupados: fila FIFO dentro do MySQL. |
+| `db` | `dbQ × dbMs × U(0,85; 1,15)` | Consultas executando; ocupa um de `dbCores` núcleos. Ao terminar: solta o núcleo e a conexão não persistente, checa o `timeout` (504) e vai para `send` como sem MySQL. |
+
+O worker (B) ou o processo (A) e a thread do Apache ficam presos durante todo o tempo no banco.
+
+**Fantasma.** Em `dbq`/`db`/`dblock`, ao passar de `timeout` desde a chegada ao backend, o cliente recebe **504 na hora** e a thread do Apache é liberada, mas o worker do FPM (ou o processo do prefork) e a conexão continuam presos até a consulta terminar ou o lock vencer; então somem sem resposta. O 1205 de um fantasma conta em "MySQL 1205" (log do PHP), mas não vira outra resposta. No `exec` (sem banco) a regra antiga continua: o 504 só aparece quando o PHP termina.
+
+**MySQL cai.** Quem está no banco → **500** com `2013` (fantasmas somem calados); todas as conexões caem, inclusive as persistentes ociosas.
+
 ## Falhas de backend
 
-Derrubar um backend falha com **502** tudo o que estava nele (chegando, nas filas, executando e enviando), porque quem entrega a resposta é o Apache daquele backend. O balanceador só deixa de listá-lo depois de `detect` segundos; nesse intervalo, novas requisições ainda vão a ele e dão 502. A volta também leva `detect` segundos. **Não há nova tentativa** no balanceador.
+Derrubar um backend falha com **502** tudo o que estava nele (chegando, nas filas, executando, no MySQL e enviando; fantasmas somem calados) e solta as conexões persistentes dos workers dele, porque quem entrega a resposta é o Apache daquele backend. O balanceador só deixa de listá-lo depois de `detect` segundos; nesse intervalo, novas requisições ainda vão a ele e dão 502. A volta também leva `detect` segundos. **Não há nova tentativa** no balanceador.
 
 ## Constantes
 
@@ -55,6 +80,9 @@ Derrubar um backend falha com **502** tudo o que estava nele (chegando, nas fila
 | Heartbeat do FPM | 1000 ms | `FPM_IDLE_SERVER_MAINTENANCE_HEARTBEAT` |
 | Teto da taxa de criação (dynamic) | 32 | `pm.max_spawn_rate` padrão |
 | Usuários | 6 | — |
+| `max_connections` padrão | 151 | sysvar `max_connections` |
+| `innodb_lock_wait_timeout` padrão | 50 s | sysvar `innodb_lock_wait_timeout` |
+| Variação das consultas | ±15% | arbitrária (a mesma do PHP) |
 
 ## Simplificações que podem levar a conclusões erradas
 
@@ -69,4 +97,11 @@ Derrubar um backend falha com **502** tudo o que estava nele (chegando, nas fila
 | Fila do FPM sem limite próprio (limitada só pelas threads do Apache). | `listen.backlog` = `somaxconn` no Linux; socket Unix cheio → nginx 502. | [roadmap](roadmap.md). |
 | Sem keep-alive, sem TLS, rede sem perda, um Redis sem rede. | — | — |
 | Sessão sem trava. | "Session data is locked to prevent concurrent writes only one script may operate on a session at any time" ([`session_write_close`](https://www.php.net/manual/en/function.session-write-close.php)): requisições simultâneas do mesmo usuário esperam uma pela outra (no phpredis a trava é opcional). | [roadmap](roadmap.md). |
+| MySQL executa no máximo `dbCores` consultas e enfileira as outras (FIFO). | Uma thread por conexão, todas disputando CPU e disco; `innodb_thread_concurrency` = 0 não limita. Vazão limitada e latência crescente são o efeito equivalente. | Balão `dbCores`. |
+| As `dbQ` consultas rodam de uma vez, num núcleo, depois do PHP. | Consultas intercaladas com o PHP, cada uma com ida e volta na rede; entre elas o núcleo fica livre. | Cenário "N+1". |
+| Conexão aberta no início do script e mantida até o fim das consultas. | Depende do código: muitos frameworks conectam na primeira consulta. | — |
+| MySQL fora = conexão recusada na hora (2002). | Se o servidor some da rede sem recusar, o `connect` espera o tempo limite e os workers ficam presos. | Cenário "MySQL fora do ar", [roadmap](roadmap.md). |
+| Sem a conexão extra de `CONNECTION_ADMIN` (`max_connections + 1`) e sem `wait_timeout`. | O servidor aceita +1 para o administrador; conexões ociosas caem depois de 8 h. | [referências §10](referencias.md#10-mysql-84). |
+| O lock trava **todas** as consultas. | Só quem escreve na linha travada (ou lê com `FOR UPDATE`) espera; leituras simples não. | Cenário "Lock". |
+| O FPM entrega a requisição ao primeiro worker ocioso da lista. | Quem aceita a conexão é decidido pelo kernel; com conexões persistentes, uma distribuição mais espalhada faria mais workers abrirem conexão (pior). **Não verificado.** | [roadmap](roadmap.md). |
 | Sessão no Redis nunca expira. | Expira em `session.gc_maxlifetime` (padrão 24 min) sem acesso. | [roadmap](roadmap.md). |

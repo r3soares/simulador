@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Simulador PHP: Apache, FPM e Redis</title>
+<title>Simulador PHP: Apache, FPM, Redis e MySQL</title>
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --fg:#1d2330; --muted:#69728a; --line:#d9dde7; --soft:#eef1f6; --blue:#1c7ed6; --orange:#e8590c; --purple:#7048e8; --green:#2f9e44; --red:#c92a2a;  --btn-ok:#1f6f2f; --btn-bad:#a32020;}
   @media (prefers-color-scheme: dark) { :root { --bg:#12151c; --card:#1b2030; --fg:#e6e9f2; --muted:#98a1b8; --line:#2c3347; --soft:#242b40; --blue:#4dabf7; --orange:#ff8a4c; --purple:#9c86ff; --green:#51cf66; --red:#ff6b6b;  --btn-ok:#237a35; --btn-bad:#b02a2a;} }
@@ -67,6 +67,8 @@
       <button id="pause">Pausar</button>
       <button id="reset">Reiniciar</button>
       <button id="redisBtn">Derrubar Redis</button>
+      <button id="dbBtn" hidden>Derrubar MySQL</button>
+      <button id="lockBtn" hidden>Travar uma linha (transação longa)</button>
       <span id="killers" class="chips"></span>
     </div>
   </div>
@@ -78,12 +80,13 @@
 
   <div class="card" style="padding:8px">
     <canvas id="cv" width="980" height="300"></canvas>
-    <div class="leg" style="padding:6px 8px"><span>bolinha = uma requisição</span><span><i style="background:var(--blue)"></i>thread do Apache ocupada</span><span><i style="background:var(--orange)"></i>worker/processo executando PHP</span><span><i style="background:var(--line)"></i>ocioso</span><span><i style="background:var(--red)"></i>erro</span><span>anel ao redor = cliente lento</span><span>bolinha vazada = resposta sem sessão</span></div>
+    <div class="leg" style="padding:6px 8px"><span>bolinha = uma requisição</span><span><i style="background:var(--blue)"></i>thread do Apache ocupada</span><span><i style="background:var(--orange)"></i>worker/processo executando PHP</span><span><i style="background:var(--line)"></i>ocioso</span><span><i style="background:var(--red)"></i>erro</span><span>anel ao redor = cliente lento</span><span>bolinha vazada = resposta sem sessão</span><span>bolinha cinza tracejada = o cliente já recebeu 504, mas o PHP ainda espera o MySQL</span></div>
     <div class="errs">
       <span><b>502</b>backend caído (conexão recusada ou interrompida)</span>
       <span><b>502 / 503</b>nenhum backend disponível</span>
       <span><b>503</b>fila de conexões do Apache cheia (backlog 511)</span>
       <span><b>504</b>tempo esgotado esperando o PHP</span>
+      <span><b>500</b>exceção do MySQL no PHP (1040, 2002, 1205, 2013)</span>
     </div>
   </div>
 
@@ -95,15 +98,15 @@
 
   <div class="card">
     <h2>Carregar configuração</h2>
-    <p class="note" style="margin:0 0 8px">Arquivos aceitos: <code>php.ini</code>, <code>www.conf</code> (pool do PHP-FPM), <code>httpd.conf</code> e <code>mpm_*.conf</code> (Apache).</p>
-    <input type="file" id="cfgfile" multiple accept=".ini,.conf,.cfg,.txt">
+    <p class="note" style="margin:0 0 8px">Arquivos aceitos: <code>php.ini</code>, <code>www.conf</code> (pool do PHP-FPM), <code>httpd.conf</code> e <code>mpm_*.conf</code> (Apache), <code>my.cnf</code> (MySQL).</p>
+    <input type="file" id="cfgfile" multiple accept=".ini,.conf,.cfg,.cnf,.txt">
     <div id="cfgreport" class="rep note" style="margin-top:10px"></div>
   </div>
 
   <div class="card">
     <h2>Parâmetros (mexa durante a execução)</h2>
     <div id="params"></div>
-    <p class="note" style="margin-bottom:0">Mudar arquitetura, número de backends, limite do Apache, max_children, pm ou start_servers reinicia a simulação. Os demais ajustes valem na hora.</p>
+    <p class="note" style="margin-bottom:0">Mudar arquitetura, número de backends, limite do Apache, max_children, pm, start_servers, banco ou conexões persistentes reinicia a simulação. Os demais ajustes valem na hora.</p>
   </div>
 </main>
 <!-- build:js (scripts/build.mjs injeta aqui o bundle de src/ui/main.js) -->
