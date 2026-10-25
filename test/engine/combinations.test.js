@@ -60,3 +60,36 @@ test('invariantes: 60 configurações aleatórias (seed fixa)', () => {
     runCase(c, 5000 + k, { secs:20 });
   }
 });
+
+// MySQL: grade menor (o resto da grade acima já cobre balanceador, sessões etc.), com lock e queda do banco
+const DB_EVENTS = [[2, s => s.burst(20)], [3, s => s.setDbLock(true)], [5, s => s.toggleBackend(0)], [6, s => s.setDb(false)], [8, s => s.setDb(true)],
+  [9, s => s.toggleBackend(0)], [11, s => s.setDbLock(false)]];
+const DB_GRID = { arch:['A', 'B'], nb:[1, 3], pm:['static', 'dynamic', 'ondemand'], dbPersist:['off', 'on'], timeout:[5, 30], dbMaxConn:[5, 151], lockWait:[2, 50] };
+
+test('invariantes com MySQL: arquitetura × backends × pm × persistente × timeouts × max_connections, com lock e queda', () => {
+  let n = 0;
+  const keys = Object.keys(DB_GRID);
+  const rec = (i, acc) => {
+    if (i === keys.length) {
+      if (acc.arch === 'A' && acc.pm !== 'static') return;
+      const c = { T:6, W:4, exec:100, db:'mysql', dbQ:3, dbMs:20, dbCores:2, ...acc };
+      for (const rate of [3, 15, 60]) runCase({ ...c, rate }, 9000 + n++, { events:DB_EVENTS, secs:14 });
+      return;
+    }
+    for (const v of DB_GRID[keys[i]]) rec(i + 1, { ...acc, [keys[i]]: v });
+  };
+  rec(0, {});
+});
+
+test('invariantes com MySQL: 40 configurações aleatórias (seed fixa)', () => {
+  const R = mulberry32(77), pickOf = a => a[Math.floor(R() * a.length)], int = (lo, hi) => lo + Math.floor(R() * (hi - lo + 1));
+  for (let k = 0; k < 40; k++) {
+    const c = {
+      arch:pickOf(['A', 'B']), nb:int(1, 3), lb:pickOf(['rr', 'ip', 'lc']), pm:pickOf(['static', 'dynamic', 'ondemand']),
+      T:pickOf([1, 4, 8, 20, 64]), W:pickOf([1, 4, 8, 16, 48]), exec:int(1, 10) * 50, session:pickOf(['none', 'file', 'redis']), slowPct:pickOf([0, 50]),
+      rate:pickOf([0, 5, 20, 80, 300]), timeout:pickOf([5, 30]), detect:int(0, 4),
+      db:'mysql', dbQ:int(1, 50), dbMs:int(1, 60), dbCores:int(1, 16), dbMaxConn:pickOf([5, 20, 151]), dbPersist:pickOf(['off', 'on']), lockWait:int(1, 60),
+    };
+    runCase(c, 7000 + k, { events:[...EVENTS, ...DB_EVENTS], secs:16 });
+  }
+});

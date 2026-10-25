@@ -31,6 +31,8 @@ $('burst').onclick = () => sim.burst(20);
 $('pause').onclick = () => { paused = !paused; $('pause').textContent = paused ? 'Continuar' : 'Pausar'; };
 $('reset').onclick = () => sim.reset();
 $('redisBtn').onclick = () => sim.setRedis(!sim.redis.up);
+$('dbBtn').onclick = () => sim.setDb(!sim.db.up);
+$('lockBtn').onclick = () => sim.setDbLock(!sim.db.locked);
 $('cfgfile').onchange = async e => {
   const files = [];
   for (const f of e.target.files) files.push([f.name, await f.text()]);

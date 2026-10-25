@@ -49,3 +49,21 @@ Legenda: ✅ confirmado em fonte oficial · ⚠️ impreciso ou com ressalva · 
 | P3 | sessão em arquivo se perde ao trocar de backend | ✅ (lab 06) | — |
 | P4 | 502 backend caído, 503 fila cheia/sem backend, 504 tempo esgotado | ✅ definições da RFC 9110; 500 não é mais usado | RFC 9110 §15.6 |
 | P5 | 2 acessos ao Redis por requisição | ✅ (com `lazy_write`, o segundo vira atualização de validade) | `session.lazy_write` |
+
+## MySQL e acesso ao banco pelo PHP
+
+Afirmações novas (versão 0.2.0), conferidas em 24/10/2026. Links em [referencias.md §1 e §10](referencias.md#10-mysql-84).
+
+| # | Afirmação | Veredito | Fonte |
+|---|---|---|---|
+| M1 | `max_connections` padrão 151; acima disso, `ERROR 1040 Too many connections` | ✅ (o servidor aceita +1 para `CONNECTION_ADMIN`, não simulado) | sysvar `max_connections`, "Too many connections", referência de erros |
+| M2 | erro do MySQL vira exceção no PHP por padrão | ✅ PDO desde 8.0 (`ERRMODE_EXCEPTION`), mysqli desde 8.1 (`MYSQLI_REPORT_ERROR \| MYSQLI_REPORT_STRICT`) | manual do PHP |
+| M3 | exceção não tratada → resposta 500 | ✅ com `display_errors` desligado e cabeçalhos ainda não enviados: `php_error_cb` troca o código para 500 em `E_ERROR`; exceção não capturada é `E_ERROR` | `main/main.c`, `Zend/zend_exceptions.c` |
+| M4 | conexão persistente: uma por processo filho, mantida ociosa; depois de um pico as conexões ficam até o worker morrer ou o banco fechar | ✅ texto quase literal do manual, que recomenda limite do banco > workers (+ crons) | "Persistent Database Connections" |
+| M5 | `innodb_lock_wait_timeout` padrão 50 s → `ERROR 1205`; vale para lock de **linha** | ✅ desfaz só o comando; não vale para lock de tabela | `innodb-parameters`, referência de erros |
+| M6 | leituras simples não esperam lock de linha | ✅ "Consistent reads ignore any locks set on the records" | "Locking Reads" |
+| M7 | `ALTER TABLE` esperando lock usa `lock_wait_timeout`, padrão 1 ano | ✅ (metadata locks) | sysvar `lock_wait_timeout`, "Metadata Locking" |
+| M8 | MySQL fora: 2002 ao conectar, 2013 durante a consulta | ✅ códigos e mensagens; 2002 é o caso de socket local (TCP é 2003). O código exato depende de como o servidor caiu | referência de erros do cliente |
+| M9 | depois do 504 o PHP continua esperando o banco | ✅ pelas fontes: `max_execution_time` não conta tempo em operações de stream fora do Windows; `request_terminate_timeout` (padrão desligado) é o que mata o worker. Comportamento exato do nginx/Apache ao desistir **não testado em container** ([roadmap](roadmap.md)) | `max_execution_time`, `request_terminate_timeout` |
+| M10 | sem índice a consulta lê a tabela inteira e fica mais cara com o tamanho | ✅ (os valores de 2 ms e 150 ms são ilustrativos) | "How MySQL Uses Indexes" |
+| M11 | o MySQL executa poucas consultas de verdade ao mesmo tempo (núcleos) | ⚠️ simplificação: `innodb_thread_concurrency` = 0 não limita; o real é uma thread por conexão disputando CPU/disco. Vazão limitada e fila de espera são o efeito equivalente | `innodb_thread_concurrency`, "Connection Interfaces" |

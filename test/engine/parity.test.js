@@ -3,9 +3,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadLegacy } from '../legacy.js';
-import { makeSim, snapshot, DT } from '../helpers.js';
+import { makeSim, snapshot, DT, BASE } from '../helpers.js';
 import { mulberry32 } from '../../src/engine/rng.js';
-import { DEFAULTS } from '../../src/model/params.js';
 
 const CASES = [
   ['padrão', {}],
@@ -29,7 +28,7 @@ for (const [name, over, events = []] of CASES) {
   test(`paridade: ${name}`, () => {
     const seed = 12345;
     const old = loadLegacy(mulberry32(seed));
-    Object.assign(old.cfg, DEFAULTS, over); old.redis.up = true; old.reset();
+    Object.assign(old.cfg, BASE, over); old.redis.up = true; old.reset();
     const neu = makeSim(over, seed);
     const secs = 40, perSec = 1000 / DT;
     for (let i = 0; i <= secs * perSec; i++) {

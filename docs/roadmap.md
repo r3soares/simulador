@@ -15,6 +15,18 @@ Melhorias e pendências conhecidas. Cada mudança de modelo deve vir com teste e
 - [ ] **Keep-alive** no prefork prendendo o processo (`KeepAliveTimeout` 5 s).
 - [ ] **Sticky como o nginx `ip_hash`:** servidor que falha só desvia os próprios usuários.
 
+### MySQL
+
+- [ ] **Host inalcançável:** hoje o MySQL fora recusa a conexão na hora (2002). Se o servidor some da rede, o `connect` espera o tempo limite (PDO `ATTR_TIMEOUT`, `default_socket_timeout`) e os workers ficam presos. Opção "recusa × some da rede".
+- [ ] **Fantasma também no `exec`:** aplicar a mesma regra do banco (504 na hora, worker preso até o fim) ao PHP sem banco. Mudaria os cenários antigos.
+- [ ] **`request_terminate_timeout`:** matar o worker que passou do limite, remédio para os fantasmas.
+- [ ] **Escolha do worker ocioso:** hoje o FPM simulado entrega ao primeiro da lista. Verificar no kernel/FPM qual worker aceita a conexão; com conexões persistentes, uma distribuição mais espalhada abre mais conexões.
+- [ ] **Réplica de leitura** e atraso de replicação (ler logo depois de gravar e não achar o dado).
+- [ ] **Pool de conexões** (ProxySQL, MySQL Router) entre o PHP e o banco.
+- [ ] **`wait_timeout`** fechando conexões persistentes ociosas e o "MySQL server has gone away" (2006) na próxima consulta.
+- [ ] **Lock só para escritas:** separar leituras (não esperam) de escritas no cenário de lock.
+- [ ] **Deadlock** (`innodb_deadlock_detect`: uma das transações recebe 1213 na hora).
+
 ## Interface
 
 - [ ] Canvas pequeno demais para ler em celulares (390 px).
@@ -26,6 +38,8 @@ Melhorias e pendências conhecidas. Cada mudança de modelo deve vir com teste e
 - [ ] F6: `ondemand` reduzindo workers, sem polling no `pm.status_path`.
 - [ ] N7: socket Unix com a fila cheia.
 - [ ] Lab 06: nginx mandando tudo ao app1 logo após subir.
+- [ ] M9: nginx/Apache devolve 504 e o worker do FPM continua preso no `SELECT ... FOR UPDATE` até o 1205.
+- [ ] M4: PHP-FPM `pm = static` com `PDO::ATTR_PERSISTENT` e `Threads_connected` depois de um pico (`ab`/`wrk`).
 
 ## Fora do simulador (arquivos dos labs)
 

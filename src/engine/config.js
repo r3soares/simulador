@@ -1,9 +1,10 @@
-// Leitura de arquivos de configuração reais (php.ini, pool do FPM, Apache).
+// Leitura de arquivos de configuração reais (php.ini, pool do FPM, Apache, my.cnf do MySQL).
 // Puro: não altera a simulação; devolve em rep.changes os valores a aplicar e, em rep, o relatório.
 import { PARAMS, idxOf } from '../model/params.js';
 
-const NAMES = { arch:'arquitetura', T:'threads/processos do Apache', pm:'pm', W:'max_children', start:'start_servers', minSpare:'min_spare_servers', maxSpare:'max_spare_servers', idleTimeout:'process_idle_timeout', opcache:'OPcache', session:'sessão' };
-const NOT_SIMULATED = ['memory_limit', 'max_execution_time', 'request_terminate_timeout', 'listen.backlog', 'pm.max_requests', 'pm.status_path', 'opcache.memory_consumption', 'opcache.validate_timestamps', 'opcache.jit', 'opcache.max_accelerated_files'];
+const NAMES = { arch:'arquitetura', T:'threads/processos do Apache', pm:'pm', W:'max_children', start:'start_servers', minSpare:'min_spare_servers', maxSpare:'max_spare_servers', idleTimeout:'process_idle_timeout', opcache:'OPcache', session:'sessão', db:'banco', dbMaxConn:'max_connections', lockWait:'innodb_lock_wait_timeout' };
+const NOT_SIMULATED = ['memory_limit', 'max_execution_time', 'request_terminate_timeout', 'listen.backlog', 'pm.max_requests', 'pm.status_path', 'opcache.memory_consumption', 'opcache.validate_timestamps', 'opcache.jit', 'opcache.max_accelerated_files',
+  'mysqli.allow_persistent', 'mysqli.max_persistent', 'wait_timeout', 'max_user_connections', 'innodb_buffer_pool_size', 'thread_cache_size', 'long_query_time', 'innodb_thread_concurrency', 'back_log', 'lock_wait_timeout'];
 export function parseIni(text) {
   const secs = [{ name:'', kv:{} }]; let cur = secs[0];
   for (const raw of text.split(/\r?\n/)) {
@@ -60,6 +61,11 @@ export function applyConfigText(name, text, rep) {
     else if (h === 'redis' || h === 'memcached' || h === 'memcache') { setCfg('session', 'redis', `${name}: session.save_handler`, rep); if (h !== 'redis') rep.notes.push(`${name}: ${h} tratado como armazenamento compartilhado (igual ao Redis).`); }
     else rep.notes.push(`${name}: session.save_handler = ${h} não é simulado.`);
   }
+  // my.cnf: o MySQL aceita - ou _ nos nomes (max-connections = max_connections)
+  const my = Object.fromEntries(Object.entries(flat).map(([k, v]) => [k.replace(/-/g, '_'), v]));
+  const mysql = src => { if (rep.changes.db !== 'mysql') setCfg('db', 'mysql', src, rep); };
+  if (my.max_connections !== undefined && !isNaN(+my.max_connections)) { found++; mysql(`${name}: max_connections`); setCfg('dbMaxConn', +my.max_connections, `${name}: max_connections`, rep); }
+  if (my.innodb_lock_wait_timeout !== undefined && !isNaN(+my.innodb_lock_wait_timeout)) { found++; mysql(`${name}: innodb_lock_wait_timeout`); setCfg('lockWait', +my.innodb_lock_wait_timeout, `${name}: innodb_lock_wait_timeout`, rep); }
   const ap = parseApache(text, rep.mpmHint);
   if (ap) {
     found++;
@@ -70,9 +76,9 @@ export function applyConfigText(name, text, rep) {
     if (total !== null) setCfg('T', total, `${name}: ${ap.maxW !== null ? 'MaxRequestWorkers' : 'ServerLimit × ThreadsPerChild'}`, rep);
     else rep.notes.push(`${name}: sem MaxRequestWorkers; mantive o valor atual de threads/processos.`);
   }
-  const ignored = NOT_SIMULATED.filter(k => k in flat || k in pk);
+  const ignored = NOT_SIMULATED.filter(k => k in flat || k in pk || k in my);
   ignored.forEach(k => { if (!rep.skipped.includes(k)) rep.skipped.push(k); });
-  if (!found) rep.notes.push(`${name}: não encontrei nenhuma chave reconhecida (pm.*, opcache.enable, session.save_handler, MaxRequestWorkers…).`);
+  if (!found) rep.notes.push(`${name}: não encontrei nenhuma chave reconhecida (pm.*, opcache.enable, session.save_handler, MaxRequestWorkers, max_connections…).`);
 }
 
 const stripHashComments = t => t.split(/\r?\n/).filter(l => !/^\s*#/.test(l)).join('\n');
